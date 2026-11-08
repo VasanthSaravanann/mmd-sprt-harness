@@ -1,0 +1,15 @@
+[package]
+name = "ebpf-verifier-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kernel eBPF program: kprobe hooks, Tier-2 honeypot interceptor, ringbuf telemetry."
+
+# The eBPF program is compiled for the BPF target (bpfel-unknown-none) with a
+# nightly toolchain.  It is intentionally a no_std crate.
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[features]
+default = []

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/harness-core",
+    "crates/harness-pipeline",
+    "crates/ebpf-verifier",
+    "crates/ebpf-verifier-ebpf",
+]
+# The eBPF crates require a Linux x86_64 `bpfel-unknown-none` target and a
+# nightly toolchain; they are NOT part of the default build so that `cargo
+# build`/`cargo test` succeeds on macOS/dev hosts.  Build them explicitly with
+# `cargo build -p ebpf-verifier` on the eBPF build host.
+default-members = [
+    "crates/harness-core",
+    "crates/harness-pipeline",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# core harness deps
+rayon = "1.10"
+tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+ndarray = { version = "0.16", features = ["rayon"] }
+rand = { version = "0.8", features = ["small_rng"] }
+num-traits = "0.2"
+
+# pipeline
+criterion = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true

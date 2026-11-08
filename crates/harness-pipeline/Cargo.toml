@@ -1,0 +1,19 @@
+[package]
+name = "harness-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified end-to-end pipeline wiring Gate 0, SPRT, and IPW."
+
+[dependencies]
+harness-core = { path = "../harness-core" }
+rayon.workspace = true
+tokio.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "pipeline_bench"
+harness = false

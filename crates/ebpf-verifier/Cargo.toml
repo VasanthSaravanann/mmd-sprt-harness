@@ -1,0 +1,21 @@
+[package]
+name = "ebpf-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Userspace side of the eBPF verifier: loads programs, attaches kprobes, drains ringbuf."
+
+[dependencies]
+aya = { version = "0.12", features = ["tokio"] }
+aya-log = "0.2"
+tokio.workspace = true
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[features]
+default = []
+
+# This crate compiles on macOS for `cargo check`, but attaching to live hooks
+# requires a privileged Linux environment with `/sys/kernel/debug/tracing`.

@@ -1,0 +1,16 @@
+[package]
+name = "harness-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core distributional-attestation, SPRT, and IPW evaluation kernels."
+
+[dependencies]
+rayon.workspace = true
+tokio.workspace = true
+ndarray.workspace = true
+rand.workspace = true
+num-traits.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
