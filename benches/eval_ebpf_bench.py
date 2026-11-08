@@ -2,24 +2,26 @@
 """Real eBPF verifier benchmark (runs on Linux, requires root).
 
 Measures:
-  1. Canary-open-to-SIGKILL latency (µs) — the critical path for honeypot enforcement.
-  2. Ringbuffer telemetry throughput (events/sec) — zero-copy event pipeline capacity.
+  1. Canary-open-to-SIGKILL latency (µs) — forking a child that touches the
+     canary file; the parent times how long the child survives.
+  2. Ringbuffer telemetry throughput (events/sec) — counts ``event pid=`` lines
+     from the loader's stderr while firing connect() syscalls.
   3. CPU and RSS overhead of the userspace loader under sustained load.
-  4. Stress-ng CPU load impact on enforcement latency (race-window widening).
 
 Usage:
   # Build the kernel program first (on the Linux build host):
-  cargo +nightly build -p ebpf-verifier-ebpf --release --target bpfel-unknown-none -Z build-std=core
+  cargo +nightly build -p ebpf-verifier-ebpf --release \\
+      --target bpfel-unknown-none -Z build-std=core
 
-  # Run the benchmark (requires root for bpf + signal delivery):
+  # Run the benchmark (root required for eBPF):
   sudo .venv/bin/python benches/eval_ebpf_bench.py \\
-    --ebpf-obj target/bpfel-unknown-none/release/ebpf-verifier \\
-    --output paper/figures
+      --ebpf-obj target/bpfel-unknown-none/release/ebpf-verifier-ebpf \\
+      --output paper/figures
 
 Output:
-  - paper/figures/fig5_ebpf_real_latency.pdf  — box plot of enforcement latency
-  - paper/figures/fig5_ebpf_real_throughput.pdf — ringbuf event throughput
-  - paper/figures/fig5_ebpf_real_overhead.json  — CPU/RSS summary
+  - paper/figures/fig5_ebpf_real_latency.pdf
+  - paper/figures/fig5_ebpf_real_throughput.pdf
+  - paper/figures/fig5_ebpf_real_overhead.json
 """
 
 from __future__ import annotations
@@ -27,16 +29,15 @@ from __future__ import annotations
 import json
 import math
 import os
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from typing import List, Optional, Tuple
+from threading import Thread
+from typing import Iterator, List, Optional, Tuple
 
-# matplotlib is soft-required; the script falls back to JSON-only if missing.
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -52,13 +53,14 @@ except ImportError:
     HAS_PSUTIL = False
 
 CANARY_PATH = "/tmp/canary_token.key"
-RINGBUF_SIZE = 1024 * 1024  # 1 MB, matches the eBPF program
 
 
 def parse_args() -> Namespace:
     p = ArgumentParser(description="Real eBPF verifier benchmark")
-    p.add_argument("--ebpf-obj", required=True, help="Path to compiled ebpf-verifier .o")
-    p.add_argument("--output", default="paper/figures", help="Output directory")
+    p.add_argument("--ebpf-obj", required=True,
+                   help="Path to compiled ebpf-verifier-ebpf .o")
+    p.add_argument("--output", default="paper/figures",
+                   help="Output directory for figures & JSON")
     p.add_argument("--count", type=int, default=150,
                    help="Number of canary-touch iterations for latency measurement")
     p.add_argument("--duration", type=float, default=10.0,
@@ -69,85 +71,90 @@ def parse_args() -> Namespace:
 
 
 def check_prereqs() -> None:
-    """Verify that required tools and permissions are available."""
     if os.geteuid() != 0:
-        print("WARNING: not running as root — eBPF program loading will fail.", file=sys.stderr)
-        print("Run with: sudo ...", file=sys.stderr)
-    if not os.path.exists(CANARY_PATH) and not os.access("/tmp", os.W_OK):
-        print(f"WARNING: cannot write {CANARY_PATH} (no /tmp write access)", file=sys.stderr)
+        print("WARNING: not running as root — eBPF program loading will fail.",
+              file=sys.stderr)
+    Path(CANARY_PATH).write_bytes(b"canary")  # create the honeypot target
     if not HAS_PSUTIL:
-        print("INFO: psutil not installed; CPU/RSS measurement disabled.")
+        print("INFO: psutil not installed; CPU/RSS measurement disabled.",
+              file=sys.stderr)
         print("  install: pip install psutil", file=sys.stderr)
 
 
-def stress_cpu(duration: float) -> Optional[subprocess.Popen]:
-    """Spawn stress-ng CPU workers; returns None if stress-ng is unavailable."""
-    try:
-        n = os.cpu_count() or 4
-        return subprocess.Popen(
-            ["stress-ng", "--cpu", str(n), "--timeout", f"{int(math.ceil(duration))}s"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        print("  (stress-ng not found; CPU load sim disabled)")
-        return None
+# ---------------------------------------------------------------------------
+#  Helper: drain loader stderr in a thread (prevents pipe deadlock)
+# ---------------------------------------------------------------------------
+
+def _drain_stderr(stream: Iterator[bytes]) -> int:
+    """Count lines containing 'event pid='; return total."""
+    count = 0
+    for line in stream:
+        if b"event pid=" in line:
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
-#  1. Canary-open-to-SIGKILL latency
+#  1. Canary-open-to-SIGKILL latency  (via forked child)
 # ---------------------------------------------------------------------------
 
-def _canary_touch() -> float:
-    """Open the canary file and return the wall-clock time until SIGKILL (µs)."""
-    sentinel = [None]  # captured by the signal handler
-
-    def handler(signum, frame):
-        sentinel[0] = time.perf_counter()
-
-    old = signal.signal(signal.SIGKILL, handler)
-    start = time.perf_counter()
+def _child_touch() -> None:
+    """Child process: open the canary file.  The kernel kills us with SIGKILL."""
+    # SIGKILL cannot be caught/blocked, so this call will never return.
     try:
-        # Opening the path triggers the kprobe -> bpf_send_signal(SIGKILL)
         with open(CANARY_PATH, "rb"):
             pass
-    except (FileNotFoundError, PermissionError):
-        pass  # the process is killed before open returns
-    elapsed = (sentinel[0] - start) * 1e6 if sentinel[0] else float("nan")
-    # Restore default SIGKILL disposition per process group — can't restore per-process
-    # (SIGKILL cannot be caught or ignored, but the handler table entry is process-local).
-    signal.signal(signal.SIGKILL, signal.SIG_DFL)
-    return elapsed
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    # If we somehow survive, make sure we exit loudly.
+    os._exit(99)
 
 
-def measure_latency(loader: subprocess.Popen, n: int,
+def measure_latency(loader_pid: int, n: int,
                     args: Namespace) -> List[float]:
-    """Measure SIGKILL latency across `n` canary touches."""
+    """Measure SIGKILL latency by forking children and timing their lifespan.
+
+    Returns wall-clock time (µs) from child creation to SIGKILL delivery.
+    """
     print(f"[ebpf-bench] Measuring SIGKILL latency ({n} samples)...")
-    # Ensure the canary file exists
-    Path(CANARY_PATH).write_bytes(b"canary")
 
     stress: Optional[subprocess.Popen] = None
     if args.stress:
-        stress = stress_cpu(n * 0.1 + 5.0)
-        if stress:
+        try:
+            n_cpu = os.cpu_count() or 4
+            stress = subprocess.Popen(
+                ["stress-ng", "--cpu", str(n_cpu),
+                 "--timeout", f"{int(math.ceil(n * 0.05 + 5))}s"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
             print(f"  stress-ng running (pid={stress.pid})")
+        except FileNotFoundError:
+            print("  (stress-ng not found; skipping CPU load)")
 
     latencies: List[float] = []
-    # Warmup: touch once to populate any caches
-    _canary_touch()
-
-    for _ in range(n):
-        # Wait briefly between touches to let the ringbuffer drain and avoid
-        # cascading kills on the same process.
-        time.sleep(0.05)
-        lat = _canary_touch()
-        if not math.isnan(lat):
-            latencies.append(lat)
+    for i in range(n):
+        start = time.perf_counter()
+        pid = os.fork()
+        if pid == 0:
+            # Child: touch the canary and be killed
+            _child_touch()
+        else:
+            # Parent: wait for the child to be killed by SIGKILL (signal 9)
+            wpid, status = os.waitpid(pid, 0)
+            elapsed = (time.perf_counter() - start) * 1e6
+            if os.WIFSIGNALED(status) and os.WTERMSIG(status) == 9:
+                latencies.append(elapsed)
+            else:
+                print(f"  WARNING: child {pid} exited with status {status} "
+                      f"(expected SIGKILL=9)", file=sys.stderr)
+        time.sleep(0.01)  # small inter-touch gap
 
     if stress:
         stress.terminate()
-        stress.wait(timeout=5)
-    Path(CANARY_PATH).unlink(missing_ok=True)
+        try:
+            stress.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            stress.kill()
 
     print(f"  samples={len(latencies)}  median={_p(latencies, 50):.1f}µs  "
           f"p95={_p(latencies, 95):.1f}µs  max={max(latencies):.1f}µs")
@@ -158,64 +165,66 @@ def measure_latency(loader: subprocess.Popen, n: int,
 #  2. Ringbuffer telemetry throughput
 # ---------------------------------------------------------------------------
 
-def measure_throughput(loader: subprocess.Popen,
-                       duration: float) -> Tuple[int, float]:
-    """Count events received from the eBPF ringbuffer over `duration` seconds."""
-    print(f"[ebpf-bench] Measuring ringbuf throughput ({duration}s)...")
-    # The loader process prints "event pid=..." to stderr (via log).  We count
-    # lines containing "event pid=".
-    start = time.perf_counter()
-    event_count = 0
-    while time.perf_counter() - start < duration:
-        # Generate connect syscalls to trigger the telemetry kprobe
-        import socket
+def _connect_storm(duration: float) -> None:
+    """Fire connect() calls in a tight loop for `duration` seconds."""
+    import socket
+    end = time.perf_counter() + duration
+    while time.perf_counter() < end:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.1)
-            s.connect(("127.0.0.1", 1))  # will fail fast (no service)
+            s.settimeout(0.001)
+            s.connect(("127.0.0.1", 1))
         except (ConnectionRefusedError, OSError, socket.timeout):
             pass
         finally:
             s.close()
-        event_count += 1  # each connect produces one ringbuf event
-        time.sleep(0.001)  # pace to avoid overwhelming the ringbuf
 
-    elapsed = time.perf_counter() - start
-    rate = event_count / elapsed
-    print(f"  events={event_count}  elapsed={elapsed:.1f}s  rate={rate:.0f} events/s")
-    return event_count, rate
+
+def measure_throughput(duration: float) -> Tuple[int, float]:
+    """Count ringbuf events from the loader's stderr while firing connects."""
+    print(f"[ebpf-bench] Measuring ringbuf throughput ({duration}s)...")
+
+    # Fire connect syscalls in a background thread while we count events.
+    storm = Thread(target=_connect_storm, args=(duration,), daemon=True)
+    storm.start()
+
+    # The event counting is done by the stderr drain thread which was started
+    # before the storm.  We just wait for the storm to finish, then give the
+    # drain thread a moment to catch up.
+    storm.join()
+    time.sleep(0.5)
+
+    # The count is accumulated in _stderr_count (set by main()).
+    return None  # placeholder — count is returned via _stderr_count
 
 
 # ---------------------------------------------------------------------------
 #  3. CPU / RSS overhead
 # ---------------------------------------------------------------------------
 
-def measure_overhead(loader: subprocess.Popen,
+def measure_overhead(proc: psutil.Process,
                      duration: float) -> dict:
     """Sample CPU% and RSS of the loader process."""
     if not HAS_PSUTIL:
         return {"cpu_percent": None, "rss_mb": None}
     print(f"[ebpf-bench] Measuring CPU/RSS ({duration}s)...")
-    try:
-        proc = psutil.Process(loader.pid)
-        cpu_samples: List[float] = []
-        rss_samples: List[float] = []
-        start = time.perf_counter()
-        while time.perf_counter() - start < duration:
-            try:
-                cpu_samples.append(proc.cpu_percent(interval=0.2))
-                rss_samples.append(proc.memory_info().rss / (1024 * 1024))
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                break
-        result = {
-            "cpu_percent": {"mean": _mean(cpu_samples), "max": max(cpu_samples)},
-            "rss_mb": {"mean": _mean(rss_samples), "max": max(rss_samples)},
-        }
-        print(f"  CPU mean={result['cpu_percent']['mean']:.1f}%  "
-              f"RSS mean={result['rss_mb']['mean']:.1f} MB")
-        return result
-    except psutil.NoSuchProcess:
-        return {"cpu_percent": None, "rss_mb": None}
+    cpu_samples: List[float] = []
+    rss_samples: List[float] = []
+    end = time.perf_counter() + duration
+    while time.perf_counter() < end:
+        try:
+            cpu_samples.append(proc.cpu_percent(interval=0.2))
+            rss_samples.append(proc.memory_info().rss / (1024 * 1024))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            break
+    result = {
+        "cpu_percent": {"mean": _mean(cpu_samples), "max": max(cpu_samples)},
+        "rss_mb": {"mean": _mean(rss_samples), "max": max(rss_samples)},
+    }
+    print(f"  CPU mean={result['cpu_percent']['mean']:.1f}%  "
+          f"RSS mean={result['rss_mb']['mean']:.1f} MB")
+    return result
+
 
 # ---------------------------------------------------------------------------
 #  Helpers
@@ -242,7 +251,7 @@ def save_latency_figure(latencies: List[float], path: str) -> None:
     ax.boxplot(latencies, vert=True, patch_artist=True,
                boxprops=dict(facecolor="#b3e5fc"))
     ax.set_ylabel("enforcement latency (µs)")
-    ax.set_title(f"eBPF bpf_send_signal SIGKILL latency "
+    ax.set_title(f"eBPF SIGKILL latency "
                  f"(n={len(latencies)}, median={_p(latencies, 50):.1f}µs)")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -251,13 +260,13 @@ def save_latency_figure(latencies: List[float], path: str) -> None:
     print(f"[ebpf-bench] wrote {path}")
 
 
-def save_throughput_figure(rates: List[float], path: str) -> None:
+def save_throughput_figure(events_per_sec: float, path: str) -> None:
     if not HAS_MPL:
         return
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(["ringbuf events/s"], [rates[0]], color="#81c784")
+    ax.bar(["ringbuf events/s"], [events_per_sec], color="#81c784")
     ax.set_ylabel("events / sec")
-    ax.set_title(f"eBPF ringbuf telemetry throughput ({rates[0]:.0f} events/s)")
+    ax.set_title(f"eBPF ringbuf throughput ({events_per_sec:.0f} events/s)")
     ax.grid(alpha=0.3, axis="y")
     fig.tight_layout()
     fig.savefig(path)
@@ -279,48 +288,92 @@ def main() -> int:
         print(f"ERROR: eBPF object not found: {ebpf_obj}", file=sys.stderr)
         return 1
 
-    # Start the userspace loader
-    print(f"[ebpf-bench] Starting loader: {ebpf_obj}")
+    # Locate the userspace loader binary.
+    bin_path = Path(__file__).resolve().parent.parent / "target" / "release" / "ebpf-verifier"
+    if not bin_path.exists():
+        print(f"ERROR: loader binary not found: {bin_path}. "
+              f"Build it first: cargo build -p ebpf-verifier --release",
+              file=sys.stderr)
+        return 1
+
+    print(f"[ebpf-bench] Starting loader: {bin_path} --path {ebpf_obj}")
+
+    # Use a temp file for stderr so we can count events without pipe deadlock.
+    # stdout is mostly quiet; we redirect it to /dev/null.
+    stderr_tmp = tempfile.NamedTemporaryFile(prefix="ebpf-loader-", suffix=".log",
+                                             delete=False, mode="w+")
+    stderr_path = stderr_tmp.name
+
     loader = subprocess.Popen(
-        [".venv/bin/python", "-m", "harness.ebpf_runner", str(ebpf_obj)],
-        # Or directly: [str(ebpf_obj.parent / "ebpf-verifier"), "--path", str(ebpf_obj)]
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        [str(bin_path), "--path", str(ebpf_obj)],
+        stdout=subprocess.DEVNULL,
+        stderr=stderr_tmp,
     )
-    time.sleep(1.5)  # wait for kprobe attachment
+    time.sleep(1.5)  # wait for kprobe attachment + startup
 
     if loader.poll() is not None:
-        print(f"ERROR: loader exited prematurely (rc={loader.returncode})", file=sys.stderr)
+        print(f"ERROR: loader exited prematurely (rc={loader.returncode})",
+              file=sys.stderr)
+        stderr_tmp.close()
+        with open(stderr_path) as f:
+            sys.stderr.write(f.read())
         return 1
 
     results: dict = {}
+    stderr_tmp.close()
 
     try:
-        # Phase 1: enforcement latency
-        latencies = measure_latency(loader, args.count, args)
+        # Phase 1: enforcement latency (fork child approach)
+        latencies = measure_latency(loader.pid, args.count, args)
         results["sigkill_latency_us"] = {
             "n": len(latencies),
             "median": _p(latencies, 50),
             "p95": _p(latencies, 95),
             "p99": _p(latencies, 99),
-            "min": min(latencies),
-            "max": max(latencies),
+            "min": min(latencies) if latencies else 0,
+            "max": max(latencies) if latencies else 0,
         }
-        save_latency_figure(latencies, os.path.join(args.output, "fig5_ebpf_real_latency.pdf"))
+        save_latency_figure(latencies,
+                            os.path.join(args.output, "fig5_ebpf_real_latency.pdf"))
 
-        # Phase 2: ringbuf throughput
-        ev_count, ev_rate = measure_throughput(loader, args.duration)
-        results["ringbuf_throughput"] = {"events": ev_count, "events_per_sec": ev_rate}
-        save_throughput_figure([ev_rate], os.path.join(args.output, "fig5_ebpf_real_throughput.pdf"))
+        # Phase 2: ringbuf throughput — fire connects, then count event lines.
+        print(f"[ebpf-bench] Measuring ringbuf throughput ({args.duration}s)...")
+        # Truncate the stderr log so we count only events during the storm.
+        open(stderr_path, "w").close()
+        storm = Thread(target=_connect_storm, args=(args.duration,), daemon=True)
+        storm.start()
+        storm.join()
+        time.sleep(0.5)  # let ringbuf drain
+
+        # Count event lines from the loader's stderr.
+        event_count = 0
+        with open(stderr_path) as f:
+            for line in f:
+                if "event pid=" in line:
+                    event_count += 1
+        ev_rate = event_count / args.duration
+        results["ringbuf_throughput"] = {
+            "events": event_count,
+            "events_per_sec": ev_rate,
+        }
+        save_throughput_figure(ev_rate,
+                               os.path.join(args.output, "fig5_ebpf_real_throughput.pdf"))
 
         # Phase 3: CPU/RSS overhead
-        overhead = measure_overhead(loader, args.duration)
-        results["overhead"] = overhead
+        if HAS_PSUTIL:
+            overhead = measure_overhead(psutil.Process(loader.pid), args.duration)
+            results["overhead"] = overhead
+        else:
+            results["overhead"] = {"cpu_percent": None, "rss_mb": None}
 
     finally:
         loader.terminate()
-        loader.wait(timeout=5)
-        if loader.returncode is None:
+        try:
+            loader.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             loader.kill()
+            loader.wait()
+        os.unlink(stderr_path)
 
     # Write JSON summary
     summary_path = os.path.join(args.output, "fig5_ebpf_real_overhead.json")
@@ -329,14 +382,15 @@ def main() -> int:
     print(f"[ebpf-bench] wrote {summary_path}")
 
     print("\n=== Summary ===")
-    print(f"  SIGKILL latency:  median={results['sigkill_latency_us']['median']:.1f}µs  "
-          f"p95={results['sigkill_latency_us']['p95']:.1f}µs")
+    lat = results["sigkill_latency_us"]
+    print(f"  SIGKILL latency:  median={lat['median']:.1f}µs  "
+          f"p95={lat['p95']:.1f}µs  p99={lat['p99']:.1f}µs")
     print(f"  Ringbuf throughput:  {results['ringbuf_throughput']['events_per_sec']:.0f} events/s")
-    if overhead.get("cpu_percent"):
-        c = overhead["cpu_percent"]
+    if results["overhead"].get("cpu_percent") and results["overhead"]["cpu_percent"]["mean"] is not None:
+        c = results["overhead"]["cpu_percent"]
         print(f"  CPU:  mean={c['mean']:.1f}%  max={c['max']:.1f}%")
-    if overhead.get("rss_mb"):
-        r = overhead["rss_mb"]
+    if results["overhead"].get("rss_mb") and results["overhead"]["rss_mb"]["mean"] is not None:
+        r = results["overhead"]["rss_mb"]
         print(f"  RSS:  mean={r['mean']:.1f} MB  max={r['max']:.1f} MB")
     return 0
 
