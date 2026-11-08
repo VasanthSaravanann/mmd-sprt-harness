@@ -1,10 +1,16 @@
 //! In-kernel eBPF verifier program (aya-ebpf).
 //!
-//! * `sys_enter_connect` kprobe  — telemetry (Tier 2 near-miss).
-//! * `sys_enter_openat`  kprobe  — **honeypot interceptor**.  `openat` carries
-//!   the user-space `filename` pointer, so this is the correct hook to detect
-//!   direct path access to `/tmp/canary_token.key`.  On a match the program
-//!   fires `bpf_send_signal(SIGKILL)` directly in-kernel (<10µs).
+//! Kprobes attach to kernel syscall-entry functions; the symbol names on x86_64
+//! are `__x64_sys_connect` and `__x64_sys_openat` (the userspace loader in
+//! `ebpf-verifier` uses those names).  The `#[kprobe]` macro labels below are
+//! eBPF function identifiers — they do NOT need to match the kernel symbol.
+//!
+//! * `__x64_sys_connect` kprobe — telemetry (Tier 2 near-miss).
+//! * `__x64_sys_openat`  kprobe — **honeypot interceptor**.  `openat` carries
+//!   the user-space `filename` pointer as its second register argument (`regs.si`
+//!   on x86_64), so this is the correct hook to detect direct path access to
+//!   `/tmp/canary_token.key`.  On a match the program fires
+//!   `bpf_send_signal(SIGKILL)` directly in-kernel (<10µs).
 //!   Note: a kprobe cannot veto the syscall; the mitigation is the signal, not
 //!   the return code.
 //! * Near-miss events are emitted to userspace over a `BPF_MAP_TYPE_RINGBUF`
@@ -110,7 +116,10 @@ fn is_canary_path(buf: &[u8; FILENAME_BUF]) -> bool {
     true
 }
 
-/// Kprobe on `sys_enter_connect` — Tier 2 telemetry.
+/// Kprobe on `__x64_sys_connect` — Tier 2 telemetry.
+///
+/// The userspace loader attaches this program to the kernel symbol
+/// `__x64_sys_connect` (the function name here is just the eBPF program label).
 #[kprobe]
 pub fn sys_enter_connect(ctx: KProbeContext) -> u32 {
     info!(&ctx, "connect pid={} tid={}", ctx.pid(), ctx.tid());
@@ -118,7 +127,11 @@ pub fn sys_enter_connect(ctx: KProbeContext) -> u32 {
     0
 }
 
-/// Kprobe on `sys_enter_openat` — Tier 1 honeypot interceptor.
+/// Kprobe on `__x64_sys_openat` — Tier 1 honeypot interceptor.
+///
+/// On x86_64, at the entry of `__x64_sys_openat`, `regs.si` contains the
+/// user-space filename pointer (syscall arg 1).  We read the path into a
+/// bounded buffer and compare it against the canary path.
 #[kprobe]
 pub fn sys_enter_openat(ctx: KProbeContext) -> u32 {
     let filename = unsafe { read_openat_filename(&ctx) };

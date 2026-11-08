@@ -1,8 +1,10 @@
-//! Userspace eBPF verifier: loads the kernel program, attaches the `connect`
-//! and `openat` kprobes, and drains near-miss telemetry from the ringbuffer.
+//! Userspace eBPF verifier: loads the kernel program, attaches kprobes and
+//! drains near-miss telemetry from the ringbuffer.
 //!
-//! Production replacement for the userspace mock: events arrive zero-copy over
-//! a `BPF_MAP_TYPE_RINGBUF` (no `near_misses.jsonl` disk writes).
+//! Attaches to `__x64_sys_connect` and `__x64_sys_openat` on x86_64.
+//! `sys_enter_*` are tracepoint names, not kprobe symbols — the real kernel
+//! symbols are `__x64_sys_connect` / `__x64_sys_openat` (or `__arm64_*` on aarch64).
+//! See crates/ebpf-verifier-ebpf/src/main.rs for the kernel-side handler.
 //!
 //! Requires a privileged Linux host with `/sys/kernel/debug/tracing`; it is not
 //! built on macOS/dev hosts (see `README.md`).
@@ -54,7 +56,14 @@ fn main() -> anyhow::Result<()> {
         warn!("eBPF logger init failed (continuing): {e}");
     }
 
-    for (prog_name, hook) in [("sys_enter_connect", "sys_enter_connect"), ("sys_enter_openat", "sys_enter_openat")] {
+    // `sys_enter_*` tracepoints don't exist as kprobe symbols; the real kernel
+    // function names for syscall handlers are `__x64_sys_connect`,
+    // `__x64_sys_openat` (x86_64) or `__arm64_sys_*` (aarch64).  The program
+    // names (`#[kprobe]` in the ebpf crate) are arbitrary eBPF function labels.
+    for (prog_name, hook) in [
+        ("sys_enter_connect", "__x64_sys_connect"),
+        ("sys_enter_openat", "__x64_sys_openat"),
+    ] {
         let prog: &mut KProbe = ebpf
             .program_mut(prog_name)
             .ok_or_else(|| anyhow::anyhow!("program {prog_name} not found"))?

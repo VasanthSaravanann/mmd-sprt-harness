@@ -50,13 +50,28 @@ python3 -m venv .venv
 .venv/bin/python benches/run_all_benches.sh  # Full benchmark sweep + figure generation
 ```
 
-### eBPF program (requires separate Linux build host)
+### eBPF program (requires a Linux build host, runs as root)
+
+The eBPF verifier cannot be compiled or tested on macOS — it needs a Linux host, a
+nightly Rust toolchain with the `rust-src` component, and the `bpf-linker` tool.
 
 ```bash
-rustup target add bpfel-unknown-none
-cargo build -p ebpf-verifier-ebpf --target bpfel-unknown-none
+# One-time toolchain setup (Linux)
+rustup toolchain install nightly --component rust-src
+cargo install bpf-linker
+
+# Build the kernel program (nightly + build-std for the bpf target)
+cargo +nightly build -p ebpf-verifier-ebpf --release --target bpfel-unknown-none -Z build-std=core
+
+# Run the userspace loader (requires root)
 sudo cargo run -p ebpf-verifier
 ```
+
+The kernel program attaches kprobes to `__x64_sys_connect` and `__x64_sys_openat`
+(x86_64 kernel symbols; adjust for aarch64). At `__x64_sys_openat` entry, `regs.si`
+holds the user-space filename pointer, which the program reads and compares against
+`/tmp/canary_token.key`. On a match, `bpf_send_signal(SIGKILL)` fires from kernel
+context (<10 µs).
 
 ## Pipeline stages
 
