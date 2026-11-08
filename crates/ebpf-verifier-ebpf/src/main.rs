@@ -26,7 +26,9 @@
 // aya-ebpf 0.1.1 renamed KProbeContext to ProbeContext, and the regs() method
 // is now a field (ctx.regs).  EbpfContext provides pid() / tgid().
 use aya_ebpf::bindings::pt_regs;
-use aya_ebpf::helpers::{bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_send_signal};
+use aya_ebpf::helpers::{
+    bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_user_str_bytes, bpf_send_signal,
+};
 use aya_ebpf::macros::{kprobe, map};
 use aya_ebpf::maps::RingBuf;
 use aya_ebpf::programs::ProbeContext;
@@ -89,14 +91,28 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Read the `openat` filename argument (x86_64 syscall arg 1 = `rsi`).
-/// The x86_64 `pt_regs` struct uses the field name `si` (not `rsi`).
+/// Read the `openat` filename argument.
+///
+/// `__x64_sys_openat` receives a pointer to the user-space `pt_regs` in `rdi`
+/// (the outer register context saved at kprobe entry).  The actual filename
+/// pointer is in `rsi` of that **inner** `pt_regs`.  So we:
+/// 1. Read `outer.rdi` — a pointer to the user pt_regs.
+/// 2. Dereference with `bpf_probe_read_kernel` to get the inner pt_regs.
+/// 3. Read `inner.rsi` — the filename pointer (syscall arg 1 of openat).
+/// 4. Pass that to `bpf_probe_read_user_str_bytes` to read the path string.
+///
+/// The aya-ebpf x86_64 bindings use `rsi` (not the kernel header name `si`).
 #[inline(always)]
 unsafe fn read_openat_filename(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
-    let regs: &pt_regs = &*ctx.regs;
-    let arg_ptr = regs.si as *const u8;
+    let outer: &pt_regs = &*ctx.regs;
+    // outer.rdi points to the user-space pt_regs on x86_64 syscall entry.
+    let inner_ptr = outer.rdi as *const pt_regs;
+    // Safely read the inner pt_regs from kernel memory.
+    let inner: pt_regs = bpf_probe_read_kernel(inner_ptr).unwrap_or(core::mem::zeroed());
+    // inner.rsi is the filename pointer (syscall arg 1 of openat).
+    let filename_ptr = inner.rsi as *const u8;
     let mut buf = [0u8; FILENAME_BUF];
-    let _ = bpf_probe_read_user_str_bytes(arg_ptr, &mut buf);
+    let _ = bpf_probe_read_user_str_bytes(filename_ptr, &mut buf);
     buf
 }
 
