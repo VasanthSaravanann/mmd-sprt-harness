@@ -56,7 +56,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest numpy scipy scikit-learn
 |---|---|---|
 | Gate 0 | `gate0.rs` | `GATE0_PASS` / `GATE0_FAIL` (MMD² > eps_prod or D_act ≥ 0.05) |
 | SPRT | `sprt.rs` | `PASS` / `INSUFFICIENT_FIT_HALT` / `BUDGET_EXHAUSTED_CONVERGING` |
-| Phase 4 | `evaluator.rs` | `INSUFFICIENT_POWER` (n_eff < 30) or weak correlation |
+| Phase 4 | `evaluator.rs` | `PASS` / `INSUFFICIENT_POWER` (n_eff < 30) / `INSUFFICIENT_CORRELATION` (r ≤ 0.85) / `NOT_SIGNIFICANT` (p ≥ 0.01) |
 | Pipeline | `run_pipeline` | `FULL_DEPLOYMENT_GRANTED` / `DEPLOYMENT_HALTED` |
 
 The eBPF path replaces the legacy disk-bound `near_misses.jsonl` telemetry with

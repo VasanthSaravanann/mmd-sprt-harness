@@ -5,9 +5,10 @@
 //! percentile to bound variance and enforce `n_eff >= 30`.
 //!
 //! The gate PASSES iff `n_eff >= 30` AND the weighted **Spearman** correlation
-//! `r_{2,IPW} > 0.85`; datasets with insufficient power fail as
-//! `INSUFFICIENT_POWER` and correlated-but-weak ones fail as `GATE0_FAIL` /
-//! `DEPLOYMENT_HALTED`.
+//! `r_{2,IPW} > 0.85` with `p < 0.01`.  It fails with the status tokens
+//! `INSUFFICIENT_POWER`, `INSUFFICIENT_CORRELATION` or `NOT_SIGNIFICANT`,
+//! mirroring the uniform status-string convention used by the Gate 0 and SPRT
+//! stages (e.g. `GATE0_PASS`, `INSUFFICIENT_FIT_HALT`).
 
 pub const N_EFF_MIN: usize = 30;
 pub const R_MIN: f64 = 0.85;
@@ -15,12 +16,27 @@ pub const P_MAX: f64 = 0.01;
 pub const PROD_FRACTION: f64 = 0.01;
 
 /// Outcome of the evaluation gate.
+///
+/// The variant is reported as a uniform status string via [`EvalOutcome::as_str`]
+/// so every pipeline stage exposes a consistent verdict token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalOutcome {
     Pass,
     InsufficientPower,
-    WeakCorrelation,
+    InsufficientCorrelation,
     NotSignificant,
+}
+
+impl EvalOutcome {
+    /// Canonical status token for this outcome.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvalOutcome::Pass => "PASS",
+            EvalOutcome::InsufficientPower => "INSUFFICIENT_POWER",
+            EvalOutcome::InsufficientCorrelation => "INSUFFICIENT_CORRELATION",
+            EvalOutcome::NotSignificant => "NOT_SIGNIFICANT",
+        }
+    }
 }
 
 /// Result of the IPW evaluator.
@@ -29,6 +45,9 @@ pub struct EvaluatorResult {
     pub r_ipw: f64,
     pub p_value: f64,
     pub outcome: EvalOutcome,
+    /// Canonical status token: `PASS`, `INSUFFICIENT_POWER`,
+    /// `INSUFFICIENT_CORRELATION` or `NOT_SIGNIFICANT`.
+    pub status: &'static str,
     pub passed: bool,
 }
 
@@ -210,7 +229,7 @@ pub fn evaluate_ipw_vec(
     let (passed, _outcome) = if n_eff < N_EFF_MIN as f64 {
         (false, EvalOutcome::InsufficientPower)
     } else if r <= R_MIN {
-        (false, EvalOutcome::WeakCorrelation)
+        (false, EvalOutcome::InsufficientCorrelation)
     } else if p >= P_MAX {
         (false, EvalOutcome::NotSignificant)
     } else {
@@ -234,17 +253,19 @@ pub fn evaluate_ipw(
     let (passed, outcome) = if n_eff < N_EFF_MIN as f64 {
         (false, EvalOutcome::InsufficientPower)
     } else if r <= R_MIN {
-        (false, EvalOutcome::WeakCorrelation)
+        (false, EvalOutcome::InsufficientCorrelation)
     } else if p >= P_MAX {
         (false, EvalOutcome::NotSignificant)
     } else {
         (true, EvalOutcome::Pass)
     };
+    let status = outcome.as_str();
     EvaluatorResult {
         n_eff,
         r_ipw: r,
         p_value: p,
         outcome,
+        status,
         passed,
     }
 }

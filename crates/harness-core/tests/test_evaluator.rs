@@ -132,3 +132,25 @@ fn winsorize_is_nan_safe() {
     assert_eq!(capped[0], 1.0);
     assert_eq!(capped[2], 1.0);
 }
+
+// Phase-4 status tokens must be consistent with the other stages' convention
+// (e.g. SPRT's PASS / INSUFFICIENT_FIT_HALT).
+#[test]
+fn eval_outcome_status_tokens() {
+    assert_eq!(EvalOutcome::Pass.as_str(), "PASS");
+    assert_eq!(EvalOutcome::InsufficientPower.as_str(), "INSUFFICIENT_POWER");
+    assert_eq!(EvalOutcome::InsufficientCorrelation.as_str(), "INSUFFICIENT_CORRELATION");
+    assert_eq!(EvalOutcome::NotSignificant.as_str(), "NOT_SIGNIFICANT");
+}
+
+#[test]
+fn evaluator_result_exposes_status_matching_outcome() {
+    let (px, py, pp, ex, ey, ep) = good_data();
+    let res = evaluate_ipw(&px, &py, &pp, &ex, &ey, &ep);
+    assert_eq!(res.status, res.outcome.as_str());
+    assert_eq!(res.status, "PASS");
+    // weak-correlation dataset reports the INSUFFICIENT_CORRELATION token
+    let noise: Vec<f64> = (0..ex.len()).map(|_| 0.5).collect();
+    let res2 = evaluate_ipw(&px, &py, &pp, &ex, &noise, &ep);
+    assert_eq!(res2.status, "INSUFFICIENT_CORRELATION");
+}

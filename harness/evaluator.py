@@ -161,6 +161,7 @@ class EvaluatorData:
     n_eff: float
     r_ipw: float
     p_value: float
+    status: str
     passed: bool
     reason: str
 
@@ -217,15 +218,19 @@ def evaluate_ipw(
     r_ipw, p_value = weighted_spearman_corr(x, y, weights)
 
     if n_eff < N_EFF_MIN:
+        status = "INSUFFICIENT_POWER"
         reason = f"n_eff={n_eff:.1f} < 30 (insufficient effective sample)"
         passed = False
     elif r_ipw <= R_MIN:
+        status = "INSUFFICIENT_CORRELATION"
         reason = f"r_IPW={r_ipw:.3f} <= 0.85"
         passed = False
     elif p_value >= P_MAX:
+        status = "NOT_SIGNIFICANT"
         reason = f"p={p_value:.4f} >= 0.01 (not significant)"
         passed = False
     else:
+        status = "PASS"
         reason = f"n_eff={n_eff:.1f}, r_IPW={r_ipw:.3f} (p={p_value:.4f})"
         passed = True
-    return EvaluatorData(x, y, weights, n_eff, r_ipw, p_value, passed, reason)
+    return EvaluatorData(x, y, weights, n_eff, r_ipw, p_value, status, passed, reason)
