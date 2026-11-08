@@ -1,0 +1,3 @@
+{"ts": 1.0, "event_id": "nm-0001", "tier": 2, "token": "tk_alpha", "logit": 0.42, "kind": "near_miss"}
+{"ts": 1.1, "event_id": "nm-0002", "tier": 2, "token": "tk_beta", "logit": 0.38, "kind": "near_miss"}
+{"ts": 1.2, "event_id": "nm-0003", "tier": 1, "token": "tk_alpha", "logit": 0.61, "kind": "near_miss"}
