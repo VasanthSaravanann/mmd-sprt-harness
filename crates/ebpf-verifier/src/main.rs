@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use aya::maps::ring_buf::RingBuf;
 use aya::programs::KProbe;
-use aya::{Btf, Ebpf};
+use aya::{Btf, EbpfLoader};
 use aya_log::EbpfLogger;
 use clap::Parser;
 use log::{info, warn};
@@ -50,8 +50,9 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", opt.path.display()))?;
 
     // BTF is optional; attach proceeds without it if unavailable.
+    // aya 0.13: Ebpf::load no longer accepts BTF; use EbpfLoader instead.
     let btf = Btf::from_sys_fs().ok();
-    let mut ebpf = Ebpf::load(&bytes, btf)?;
+    let mut ebpf = EbpfLoader::new().btf(btf.as_ref()).load(&bytes)?;
     if let Err(e) = EbpfLogger::init(&mut ebpf) {
         warn!("eBPF logger init failed (continuing): {e}");
     }
@@ -69,7 +70,8 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("program {prog_name} not found"))?
             .try_into()?;
         prog.load()?;
-        prog.attach(hook)?;
+        // aya 0.13: KProbe::attach requires an offset (0 = function entry).
+        prog.attach(hook, 0)?;
         info!("attached kprobe {hook}");
     }
 
