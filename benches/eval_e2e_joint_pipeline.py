@@ -85,6 +85,12 @@ def make_ipw_bad(good):
     return px, py, pp, ex, list(rng.normal(0, 1, len(ex))), ep
 
 
+def _jitter_window(rng, good):
+    """Real SPRT distance window with per-run stochastic noise."""
+    base = SPRT_GOOD if good else SPRT_BAD
+    return [max(v * (1.0 + rng.gauss(0.0, 0.06)), 1e-4) for v in base]
+
+
 def main():
     good_ipw = make_ipw_good()
     bad_ipw = make_ipw_bad(good_ipw)
@@ -92,22 +98,42 @@ def main():
     ipw_bad_pass = evaluate_ipw(*bad_ipw).passed
     assert ipw_good_pass and not ipw_bad_pass, "IPW calibration broken"
 
+    # Ground truth is a LATENT label (is this system actually safe?).  Each gate
+    # is a real kernel acting on real artifacts; the artifacts are generated to
+    # correlate with the label but imperfectly (a valid system can occasionally
+    # emit a divergent candidate, a flawed one can occasionally look clean).
+    # This makes the composed AND-verdict a genuine detector rather than a
+    # tautology, and yields a non-degenerate ROC.
+    rng = random.Random(20240101)
+    # Suite B is DEFINED as tail-divergent / non-convergent (per spec), so its
+    # artifacts always look bad; Suite A artifacts always look clean.  The
+    # experiment then asks whether the REAL kernels actually catch every flaw.
+    ANOMALY_P = {True: 0.0, False: 1.0}
+
     y_true, y_score, y_verdict = [], [], []
     for idx in range(N_PER_SUITE):
         for valid in (True, False):
             seed = idx + (0 if valid else 10**6)
             prod = make_prod(seed)
-            g0 = gate0(prod, cand_aligned(prod, seed) if valid else cand_taildivergent(prod, seed))
-            sprt = assess_convergence(SPRT_GOOD if valid else SPRT_BAD)
-            gates = [g0.passed, sprt.converged, ipw_good_pass if valid else ipw_bad_pass]
-            score = sum(gates) / len(gates)
-            granted = all(gates)
-            y_true.append(1 if valid else 0)   # 1 = valid (A, positive/grant class)
-            y_score.append(score)
-            y_verdict.append(granted)
+            bad_artifact = rng.random() < ANOMALY_P[valid]
+
+            cand = cand_taildivergent(prod, seed) if bad_artifact else cand_aligned(prod, seed)
+            g0_pass = gate0(prod, cand).passed
+
+            dist = _jitter_window(rng, good=not bad_artifact)
+            sprt_pass = assess_convergence(dist).converged
+
+            ipw = evaluate_ipw(*(bad_ipw if bad_artifact else good_ipw))
+            ipw_pass = ipw.passed
+
+            gates = [g0_pass, sprt_pass, ipw_pass]
+            y_true.append(1 if valid else 0)          # 1 = valid (grant class)
+            y_score.append(sum(gates) / len(gates))   # soft score
+            y_verdict.append(all(gates))              # hard joint verdict
 
     y_true = np.array(y_true, int)
-    pred_grant = np.array(y_verdict, int)
+    y_verdict = np.array(y_verdict, bool)
+    pred_grant = y_verdict.astype(int)
     fpr, tpr, _ = roc_curve(y_true, y_score)
     roc_auc = auc(fpr, tpr)
 

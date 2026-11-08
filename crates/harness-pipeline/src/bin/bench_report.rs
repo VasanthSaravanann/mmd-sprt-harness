@@ -100,10 +100,13 @@ fn bench_ringbuf() -> f64 {
     let t0 = Instant::now();
     let mut acc = 0u64;
     for _ in 0..reps {
-        for chunk in raw.chunks_exact(size) {
-            acc += unsafe {
-                std::ptr::read_unaligned(chunk.as_ptr() as *const NearMissEvent).token_digest
-            };
+        // `black_box` the buffer each iteration so the reads are not const-folded
+        // away (previously this loop was optimised to a constant, inflating the
+        // reported throughput to billions of events/sec).
+        let buf = std::hint::black_box(raw.as_slice());
+        for chunk in buf.chunks_exact(size) {
+            let ev = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const NearMissEvent) };
+            acc = acc.wrapping_add(ev.token_digest ^ ev.ts_ns ^ ev.pid as u64);
         }
     }
     let secs = t0.elapsed().as_secs_f64();

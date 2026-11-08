@@ -41,13 +41,22 @@ pub fn inverse_propensity_weight(select_prob: f64) -> f64 {
 }
 
 /// Cap weights at the `p`-th percentile (P99 by default).
+///
+/// Uses the lower percentile rank `floor(p * (n - 1))` so the top `(1 - p)`
+/// fraction is genuinely clamped.  `ceil` would land on the maximum element for
+/// common `p` (e.g. `p=0.99, n=100` -> index 99) and silently leave outliers.
 pub fn winsorize(weights: &[f64], p: f64) -> Vec<f64> {
     if weights.is_empty() {
         return Vec::new();
     }
+    assert!(p > 0.0 && p < 1.0, "winsorization p must be in (0, 1), got {p}");
+    let n = weights.len();
+    if n == 1 {
+        return weights.to_vec();
+    }
     let mut sorted: Vec<f64> = weights.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = ((p * (sorted.len() - 1) as f64).ceil() as usize).min(sorted.len() - 1);
+    let idx = (((p * (n - 1) as f64).floor()) as usize).min(n - 2);
     let cap = sorted[idx];
     weights.iter().map(|w| w.min(cap)).collect()
 }

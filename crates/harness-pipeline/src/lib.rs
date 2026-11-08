@@ -7,7 +7,10 @@
 
 use harness_core::evaluator::{evaluate_ipw, EvaluatorResult};
 use harness_core::gate0::{gate0, Gate0Result, Stream};
-use harness_core::sprt::{assess_convergence, DecayFit, FuzzerFn, Verdict};
+use harness_core::sprt::{
+    assess_convergence, run_sprt_loop, DecayFit, FuzzerFn, SprtLoopResult, Verdict, K_MAX,
+    K_MUT_MAX, K_MUT_MIN,
+};
 
 const PIPELINE_STAGES: usize = 3; // gate0, sprt, evaluator
 
@@ -38,6 +41,9 @@ pub trait Ingestion {
 pub struct PipelineReport {
     pub gate0: Option<Gate0Result>,
     pub sprt: Option<DecayFit>,
+    /// Full output of the executed parallel fuzzer loop (distances, viability,
+    /// entropy series) — populated by [`run_pipeline`].
+    pub spr_loop: Option<SprtLoopResult>,
     pub evaluator: Option<EvaluatorResult>,
     pub verdict: DeployVerdict,
 }
@@ -45,9 +51,10 @@ pub struct PipelineReport {
 impl PipelineReport {
     pub fn stage_summary(&self) -> String {
         format!(
-            "gate0={}, sprt={}, evaluator={}",
+            "gate0={}, sprt={}, spr_rounds={}, evaluator={}",
             self.gate0.as_ref().map(|g| g.passed.to_string()).unwrap_or_else(|| "n/a".into()),
             self.sprt.as_ref().map(|s| s.rd_verdict.as_str().to_string()).unwrap_or_else(|| "n/a".into()),
+            self.spr_loop.as_ref().map(|s| s.k_used.to_string()).unwrap_or_else(|| "n/a".into()),
             self.evaluator.as_ref().map(|e| e.passed.to_string()).unwrap_or_else(|| "n/a".into()),
         )
     }
@@ -69,12 +76,36 @@ pub struct SystemSpec {
 }
 
 /// Run the deterministic pipeline over a system spec.
+///
+/// `sprt_fuzzer` is **actually executed** via [`run_sprt_loop`] (K in [3, 8], up
+/// to `k_max` rounds); the resulting per-round distances are then fed to the
+/// exponential-decay convergence diagnostic.  The precomputed
+/// [`SystemSpec::sprt_distances`] window is used as an additional, independent
+/// convergence check so a caller can supply either a live fuzzer or a fixed
+/// recorded trajectory.
 pub fn run_pipeline(spec: &SystemSpec, sprt_fuzzer: &FuzzerFn) -> PipelineReport {
     // Stage 1: Gate 0 distributional attestation.
     let g0 = gate0(&spec.prod_streams, &spec.cand_streams);
 
-    // Stage 2: SPRT convergence diagnostics (on supplied per-round distances).
-    let sprt = assess_convergence(&spec.sprt_distances);
+    // Stage 2: SPRT — run the parallel fuzzer loop, then fit the decay on the
+    // fuzzer-produced distances (requires >= 5 rounds to fit).
+    let loop_result: SprtLoopResult = run_sprt_loop(sprt_fuzzer, K_MAX, K_MUT_MIN, K_MUT_MAX, 0x5eed);
+    let sprt_live = assess_convergence(&loop_result.distances);
+
+    // Also assess the caller-supplied recorded window (independent check).
+    let sprt_recorded = assess_convergence(&spec.sprt_distances);
+
+    // The pipeline converges only if BOTH the live fuzzer fit and the recorded
+    // window agree on a PASS verdict.
+    let both_converged = sprt_live.converged && sprt_recorded.converged;
+    let sprt = if both_converged {
+        sprt_live
+    } else if !sprt_live.converged {
+        // Prefer the failing one so the report explains *why* it halted.
+        sprt_live
+    } else {
+        sprt_recorded
+    };
 
     // Stage 3: Phase-4 IPW correlation gate.
     let ev = evaluate_ipw(
@@ -86,11 +117,10 @@ pub fn run_pipeline(spec: &SystemSpec, sprt_fuzzer: &FuzzerFn) -> PipelineReport
         &spec.ipw_eval_sel,
     );
 
-    // Optional: run the async/parallel fuzzer loop (unused distances dominate if
-    // we want to *exercise* it; here we validate against the provided window).
-    let _ = sprt_fuzzer; // reserved for live runs; diagnostics already computed.
-
-    let granted = g0.passed && sprt.converged && ev.passed && (sprt.rd_verdict == Verdict::Pass);
+    let granted = g0.passed
+        && both_converged
+        && ev.passed
+        && (sprt.rd_verdict == Verdict::Pass);
     let verdict = if granted {
         DeployVerdict::FullDeploymentGranted
     } else {
@@ -100,15 +130,24 @@ pub fn run_pipeline(spec: &SystemSpec, sprt_fuzzer: &FuzzerFn) -> PipelineReport
     PipelineReport {
         gate0: Some(g0),
         sprt: Some(sprt),
+        spr_loop: Some(loop_result),
         evaluator: Some(ev),
         verdict,
     }
 }
 
-/// Provide a default no-op SPRT fuzzer so callers not yet wiring the live loop
-/// can still call [`run_pipeline`].
-pub fn dummy_fuzzer() -> Box<FuzzerFn> {
+/// A reference SPRT fuzzer whose per-round distance decays geometrically
+/// (`d^(i) = 0.3^(i+1)`), producing a cleanly convergent trajectory for callers
+/// that want a known-converging baseline without a real mutation engine.
+pub fn reference_fuzzer() -> Box<FuzzerFn> {
     Box::new(|round: usize, _worker: usize| 0.3f64.powi((round + 1) as i32))
+}
+
+/// A fuzzer that never converges (jagged distances) — useful for negative
+/// pipeline tests.
+pub fn nonconverging_fuzzer() -> Box<FuzzerFn> {
+    const PATTERN: [f64; 6] = [0.30, 0.10, 0.28, 0.05, 0.22, 0.30];
+    Box::new(|round: usize, _worker: usize| PATTERN[round % PATTERN.len()])
 }
 
 pub const STAGE_COUNT: usize = PIPELINE_STAGES;

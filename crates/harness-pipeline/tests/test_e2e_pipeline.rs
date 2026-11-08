@@ -1,5 +1,7 @@
 use harness_core::gate0::Stream;
-use harness_pipeline::{run_pipeline, dummy_fuzzer, DeployVerdict, SystemSpec};
+use harness_pipeline::{
+    nonconverging_fuzzer, reference_fuzzer, run_pipeline, DeployVerdict, SystemSpec,
+};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 const MOTIFS: &[&[u8]] = &[b"abba", b"aaba", b"baab"];
@@ -84,18 +86,22 @@ fn spec(prod: &[Stream], cand: &[Stream], sprt: &[f64],
 fn robust_system_grants_full_deployment() {
     let prod = make_prod();
     let s = spec(&prod, &healthy(&prod), &[0.30, 0.20, 0.12, 0.07, 0.04], good_ipw());
-    let rep = run_pipeline(&s, dummy_fuzzer().as_ref());
+    let rep = run_pipeline(&s, reference_fuzzer().as_ref());
     assert_eq!(rep.verdict, DeployVerdict::FullDeploymentGranted, "{}", rep.stage_summary());
     assert!(rep.gate0.is_some());
     assert!(rep.sprt.is_some());
     assert!(rep.evaluator.is_some());
+    // the parallel fuzzer loop must actually have run (>= 5 rounds => a fit)
+    let loop_res = rep.spr_loop.as_ref().expect("fuzzer loop must be executed");
+    assert!(loop_res.k_used >= 5, "SPRT loop must run >=5 rounds, got {}", loop_res.k_used);
+    assert_eq!(loop_res.distances.len(), loop_res.k_used);
 }
 
 #[test]
 fn flawed_baseline_halts_deployment() {
     let prod = make_prod();
     let s = spec(&prod, &exfil(&prod), &[0.30, 0.10, 0.28, 0.05, 0.22], bad_ipw());
-    let rep = run_pipeline(&s, dummy_fuzzer().as_ref());
+    let rep = run_pipeline(&s, nonconverging_fuzzer().as_ref());
     assert_eq!(rep.verdict, DeployVerdict::DeploymentHalted);
     assert_eq!(rep.verdict.as_str(), "DEPLOYMENT_HALTED");
     assert!(!rep.gate0.as_ref().unwrap().passed);
@@ -106,7 +112,7 @@ fn single_stage_weakness_halts_whole_pipeline() {
     let prod = make_prod();
     // All good except SPRT is jagged.
     let s = spec(&prod, &healthy(&prod), &[0.30, 0.10, 0.28, 0.05, 0.22], good_ipw());
-    let rep = run_pipeline(&s, dummy_fuzzer().as_ref());
+    let rep = run_pipeline(&s, reference_fuzzer().as_ref());
     assert_eq!(rep.verdict, DeployVerdict::DeploymentHalted);
     assert!(rep.gate0.as_ref().unwrap().passed);
     assert!(!rep.sprt.as_ref().unwrap().converged);

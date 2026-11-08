@@ -114,3 +114,24 @@ fn healthy_uses_shared_actions() {
 fn sigma_bandwidth_sane() {
     assert!(SIGMA_BW > 0.0 && SIGMA_BW <= 1.0);
 }
+// Cross-language consistency: a stream shorter than NGRAM_N must produce a
+// single zero-padded gram (matching Python's PAD_TOKEN convention), not a mix
+// of bare tokens and tuples.
+#[test]
+fn short_streams_zero_pad_consistently() {
+    // Two short streams that differ only by length must share the same padded
+    // gram when aligned, and the spectrum must be a single-gram distribution.
+    let a = spectrum(b"ab");
+    let b = spectrum(b"ab\x00");
+    assert_eq!(a.len(), 1);
+    assert_eq!(b.len(), 1);
+    assert_eq!(a, b, "b\"ab\" and b\"ab\\0\" must both pad to [a,b,0]");
+    assert!((a.values().sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn empty_stream_is_well_formed() {
+    let sp = spectrum(b"");
+    assert_eq!(sp.len(), 1);
+    assert!(sp.contains_key(&[0u8, 0u8, 0u8]));
+}

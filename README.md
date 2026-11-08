@@ -62,7 +62,8 @@ python3 -m venv .venv && .venv/bin/pip install pytest numpy scipy scikit-learn
 The eBPF path replaces the legacy disk-bound `near_misses.jsonl` telemetry with
 a zero-copy `BPF_MAP_TYPE_RINGBUF`, kills the canary-accessor in the kernel via
 `bpf_send_signal(SIGKILL)` (latency goal `< 10µs`), and hooks
-`sys_enter_connect` / `sys_enter_write`.
+`sys_enter_connect` (telemetry) and `sys_enter_openat` (honeypot interceptor —
+`openat` carries the user-space filename pointer, unlike `write`).
 
 ## Mathematical notes
 
@@ -77,3 +78,16 @@ a zero-copy `BPF_MAP_TYPE_RINGBUF`, kills the canary-accessor in the kernel via
 - **Phase 4** — IPW weights are winsorized at P99 before computing the effective
   sample size `n_eff = (Σw)²/Σw²` and a weighted **Spearman** correlation
   `r_{2,IPW}`. Requires `n_eff ≥ 30` and `r_{2,IPW} > 0.85`.
+
+The Phase 4 winsorization uses the lower percentile rank `floor(p·(n−1))` so the
+top `1−p` fraction is genuinely capped (using `ceil` silently left outliers
+untouched).
+
+## Known limitations
+
+- The two `ebpf-*` crates target `bpfel-unknown-none` and are excluded from the
+  default workspace build; they need a Linux host + nightly toolchain to compile.
+- Benchmark Task 5 (eBPF latency) is simulated on macOS (no BPF VM).
+- Benchmark Task 7's ≥15× figure is measured against the scalar Python reference
+  kernel this port replaces; a vectorized NumPy baseline is reported separately
+  and is faster than the scalar Rust path for these small sizes.

@@ -84,3 +84,36 @@ fn constants() {
     assert!((R_MIN - 0.85).abs() < 1e-9);
     assert!((P_MAX - 0.01).abs() < 1e-9);
 }
+// Regression: winsorize must actually cap the top (1 - p) fraction.  The old
+// ceil(p*(n-1)) index landed on the maximum element for p=0.99, so a single
+// huge outlier was never clamped (a silent no-op).
+#[test]
+fn winsorize_actually_caps_single_outlier() {
+    let mut weights = vec![1.0f64; 99];
+    weights.push(1e9);
+    let capped = winsorize(&weights, 0.99);
+    let m = capped.iter().cloned().fold(0.0f64, f64::max);
+    assert_eq!(m, 1.0, "single outlier must be clamped to P99");
+}
+
+#[test]
+fn winsorize_caps_top_one_percent_general() {
+    let weights: Vec<f64> = (1..=1000).map(|i| i as f64).collect();
+    let capped = winsorize(&weights, 0.99);
+    let n = weights.len();
+    let idx = ((0.99 * (n - 1) as f64).floor()) as usize;
+    let expected = (idx + 1) as f64; // sorted[idx] == idx+1 for 1..=1000
+    let m = capped.iter().cloned().fold(0.0f64, f64::max);
+    assert_eq!(m, expected, "cap should be sorted[{idx}] = {expected}");
+}
+
+#[test]
+#[should_panic(expected = "winsorization p must be in (0, 1)")]
+fn winsorize_rejects_invalid_p() {
+    let _ = winsorize(&[1.0, 2.0, 3.0], 1.0);
+}
+
+#[test]
+fn winsorize_single_element_unchanged() {
+    assert_eq!(winsorize(&[5.0], 0.99), vec![5.0]);
+}

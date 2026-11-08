@@ -120,21 +120,34 @@ class CascadeRouter:
 
 
 class MockSigkillGate:
-    """Mocks <2ms SIGKILL routing. Records latency and enforces the budget."""
+    """Mocks SIGKILL routing and enforces the latency budget.
+
+    The kernel call itself is simulated (we do not actually signal a process),
+    but the *measured* wall-clock cost of the mocked route is recorded alongside
+    the configured simulated cost, so the budget check reflects real overhead.
+    """
 
     def __init__(self, latency_us: float = MOCK_SIGKILL_LATENCY_US) -> None:
+        if latency_us <= 0:
+            raise ValueError(f"latency_us must be > 0, got {latency_us}")
         self.latency_us = latency_us
-        self.calls: List[float] = []
+        self.calls: List[float] = []       # simulated kernel-call cost per call
+        self.observed_us: List[float] = []  # measured wall-clock cost per call
 
     def route(self) -> float:
-        t0 = time.perf_counter()  # noqa: F841 -- kept for realism
-        # The kernel call is mocked, so we just report the simulated cost.
+        """Simulate the kernel SIGKILL route, recording its latency."""
+        t0 = time.perf_counter()
         self.calls.append(self.latency_us)
+        self.observed_us.append((time.perf_counter() - t0) * 1e6)
         return self.latency_us
 
     @property
     def max_latency_us(self) -> float:
-        return max(self.calls, default=0.0)
+        """Worst-case latency = simulated budget + worst observed overhead."""
+        if not self.calls:
+            return 0.0
+        observed = max(self.observed_us, default=0.0)
+        return max(self.calls) + observed
 
     def within_budget(self) -> bool:
         # No calls -> vacuously within budget; otherwise max must be < 2ms.
@@ -151,8 +164,6 @@ def sub_budget(latency_us: float) -> bool:
 # UNIX socket server
 # --------------------------------------------------------------------------
 class _VerifierHandler(socketserver.StreamRequestHandler):
-    schema_snapshot: List[list] = []  # populated at class-construction time
-
     def handle(self) -> None:
         router = CascadeRouter()
         gate = MockSigkillGate()
@@ -227,11 +238,25 @@ class MockVerifierServer:
         return json.loads(buf.decode("utf-8"))
 
     def close(self) -> None:
-        self._httpd.shutdown()
-        self._httpd.server_close()
-        self._thread.join(timeout=2)
+        """Stop the server and remove the socket; safe to call more than once."""
+        if self._httpd is not None:
+            try:
+                self._httpd.shutdown()
+            except Exception:  # noqa: BLE001 - shutdown is best-effort
+                pass
+            try:
+                self._httpd.server_close()
+            except Exception:  # noqa: BLE001 - server_close is best-effort
+                pass
+            self._httpd = None
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
         if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
+            try:
+                os.unlink(self.socket_path)
+            except FileNotFoundError:
+                pass
 
     def __enter__(self) -> "MockVerifierServer":
         return self.start()

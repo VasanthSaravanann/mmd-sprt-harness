@@ -40,13 +40,9 @@ pub struct Gate0Result {
 pub fn spectrum(stream: &[u8]) -> Spectrum {
     let mut counts: HashMap<[u8; NGRAM_N], u64> = HashMap::new();
     if stream.len() < NGRAM_N {
-        // degenerate: emit the whole stream as a single gram so vectors stay
-        // well-formed (preventing a divide-by-zero / empty-distribution issue).
-        let mut g = [0u8; NGRAM_N];
-        for (i, b) in stream.iter().enumerate() {
-            g[i] = *b;
-        }
-        counts.insert(g, 1);
+        // Degenerate: emit a single zero-padded gram so the distribution stays
+        // well-formed (matches the Python `PAD_TOKEN` convention exactly).
+        counts.insert(padded_gram(stream), 1);
     } else {
         for w in stream.windows(NGRAM_N) {
             let mut g = [0u8; NGRAM_N];
@@ -149,15 +145,20 @@ pub fn cosine_distance(a: &Spectrum, b: &Spectrum) -> f64 {
 }
 
 /// The set of distinct 3-grams appearing across a multiset ("actions").
+/// Pad a too-short stream into a single zero-padded gram (matches the Python
+/// `PAD_TOKEN` convention so both implementations agree exactly).
+fn padded_gram(s: &[u8]) -> [u8; NGRAM_N] {
+    debug_assert!(s.len() < NGRAM_N);
+    let mut g = [0u8; NGRAM_N];
+    g[..s.len()].copy_from_slice(s);
+    g
+}
+
 fn action_set(streams: &[Stream]) -> std::collections::HashSet<[u8; NGRAM_N]> {
     let mut out = std::collections::HashSet::new();
     for s in streams {
-        if stream_len_lt_ngram(s) {
-            let mut g = [0u8; NGRAM_N];
-            for (i, b) in s.iter().enumerate() {
-                g[i] = *b;
-            }
-            out.insert(g);
+        if s.len() < NGRAM_N {
+            out.insert(padded_gram(s));
             continue;
         }
         for w in s.windows(NGRAM_N) {
@@ -167,10 +168,6 @@ fn action_set(streams: &[Stream]) -> std::collections::HashSet<[u8; NGRAM_N]> {
         }
     }
     out
-}
-
-fn stream_len_lt_ngram(s: &[u8]) -> bool {
-    s.len() < NGRAM_N
 }
 
 /// Action Jaccard distance `D_act = 1 - |A ∩ B| / |A ∪ B|`.

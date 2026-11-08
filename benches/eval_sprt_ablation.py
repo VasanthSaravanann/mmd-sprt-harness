@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """Task 4 — SPRT rolling-fit-window (N) ablation study.
 
-A window of size N for an exponential decay fit `d^(i) = beta0 e^(-lambda i)`
-has N-2 *residual degrees of freedom*.  With N=3 there is only 1 residual df, so
-the fitted rate (-> extrapolated d^(6)) is dominated by sampling error; the
-standard error of the slope scales ~ 1/sqrt(df).  Small windows therefore
-frequently *false-halt* a healthy, actually-converging trajectory (their
-extrapolated d^(6) comes out >= the 0.02 threshold), while N=5 stabilizes the
-statistic.
+Executes `N_TRIALS` stochastic healthy trajectories across rolling-window sizes
+N in {3, 4, 5, 6, 7}.  For each N it performs a REAL exponential-decay fit
+`d^(i) = beta0 e^(-lambda i)` via `harness.fuzzer_sprt_loop.fit_exponential_decay`
+and records:
 
-We simulate `N_TRIALS` healthy trajectories, sample the fit's extrapolated
-`d^(6)` under a df-proportional standard error, and record:
-  * false-halt rate FPR  = P(extrapolated d^(6) >= 0.02 | trajectory is healthy)
-  * token savings        = (HORIZON - N) / HORIZON for trajectories that pass
-                            at the earliest window (=N).
+  * false-decision rate — the fraction of healthy trajectories whose window-N
+    verdict disagrees with the full-window (N=7) ground-truth verdict.  Short
+    windows overfit a handful of noisy points and mis-decide; this is the
+    "false halt / false pass" rate introduced by an under-powered fit.
+  * token savings — `(K_MAX - N) / K_MAX` for early stopping at the first window.
+
+All numbers are MEASURED from real fits (previously this benchmark sampled a
+hand-tuned Gaussian calibrated to produce the wanted answer).
 
 Renders fig4_sprt_window_ablation.pdf.
 
-Assertion: N=3 FPR > 12% (1 residual df), N=5 FPR < 5% with >35% token savings.
+Assertion: N=3 false-decision rate > 12% (1 residual df), while N=5 drops below
+5% and retains > 35% token savings.
 """
 from __future__ import annotations
 
@@ -32,73 +33,78 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from harness.fuzzer_sprt_loop import fit_exponential_decay  # noqa: E402
+
 OUT = os.path.join(os.path.dirname(__file__), "..", "paper", "figures", "fig4_sprt_window_ablation.pdf")
 OUT = os.path.abspath(OUT)
 
 N_TRIALS = 2000
-HORIZON = 8
+K_MAX = 8
 WINDOWS = [3, 4, 5, 6, 7]
-D6_THRESHOLD = 0.02
-TRUE_D6 = 0.0135        # healthy trajectory truly converges (well under 0.02)
-SE_AT_DF1 = 0.389       # slope SE for 1 residual df, calibrated for this gate
-GAP = math.log(D6_THRESHOLD / TRUE_D6)
+GROUND_TRUTH_WINDOW = 7
+EARLY_NOISE = 0.30  # relative noise, large early (few samples) and decaying
 
 
-def residual_df(N):
-    return max(N - 2, 1)
+def healthy_trajectory(rng):
+    """A healthy, exponentially-converging trajectory with early-heavy noise."""
+    d0 = rng.uniform(0.3, 0.5)
+    lam = rng.uniform(0.5, 0.8)
+    out = []
+    for i in range(K_MAX):
+        clean = d0 * math.exp(-lam * i)
+        sigma = EARLY_NOISE / (1.0 + i)  # noise shrinks as samples accumulate
+        out.append(max(clean * (1.0 + rng.gauss(0.0, sigma)), 1e-4))
+    return out
 
 
-def sample_passes(rng, N):
-    """Returns (false_halts, total) over N_TRIALS for a window of size N."""
-    se = SE_AT_DF1 / math.sqrt(residual_df(N))
-    for _ in range(N_TRIALS):
-        # multilativr noise on d6; d6_est = TRUE_D6 * exp(noise)
-        noise = rng.gauss(0.0, se)
-        # passes iff d6_est < 0.02  <=>  noise < log(0.02/TRUE_D6)
-        yield noise < GAP
+def window_verdict(dist, n):
+    """Real exponential-decay fit over the first `n` rounds -> converged?"""
+    return fit_exponential_decay(dist[:n]).converged
 
 
 def main():
     rng = random.Random(0)
-    fprs = []
-    savings = []
-    for N in WINDOWS:
-        halts = 0
-        for ok in sample_passes(rng, N):
-            if not ok:
-                halts += 1
-        fpr = halts / N_TRIALS * 100
-        fprs.append(fpr)
-        # earliest a passing run stops is at round = N
-        savings.append((1.0 - N / HORIZON) * 100)
+    trajectories = [healthy_trajectory(rng) for _ in range(N_TRIALS)]
+    # full-window ground truth per trajectory
+    truth = [window_verdict(d, GROUND_TRUTH_WINDOW) for d in trajectories]
+
+    fprs, savings = [], []
+    for n in WINDOWS:
+        disagree = 0
+        for d, t in zip(trajectories, truth):
+            if window_verdict(d, n) != t:
+                disagree += 1
+        fprs.append(disagree / N_TRIALS * 100)
+        savings.append((1.0 - n / K_MAX) * 100)
 
     fig, ax1 = plt.subplots(figsize=(8, 5))
     ax2 = ax1.twinx()
     ax1.plot(WINDOWS, savings, marker="o", ms=6, color="tab:blue", label="token savings (%)")
-    ax2.plot(WINDOWS, fprs, marker="s", ms=6, color="tab:red", label="false-halt rate (%)")
+    ax2.plot(WINDOWS, fprs, marker="s", ms=6, color="tab:red", label="false-decision rate (%)")
     ax1.axhline(35, color="tab:blue", ls=":", lw=1.1)
     ax2.axhline(5.0, color="tab:red", ls=":", lw=1.1)
     ax1.set_xlabel("rolling fit window N  (residual df = N − 2)")
     ax1.set_ylabel("token savings (%)", color="tab:blue")
-    ax2.set_ylabel("false-halt rate (%)", color="tab:red")
+    ax2.set_ylabel("false-decision rate (%)", color="tab:red")
     ax1.set_xticks(WINDOWS)
     ax1.grid(alpha=0.3)
     ax1.legend(loc="upper left")
     ax2.legend(loc="upper right")
-    ax1.set_title("SPRT window ablation vs false halts & token savings")
+    ax1.set_title("SPRT window ablation (real exponential fits)")
     fig.tight_layout()
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     fig.savefig(OUT)
     plt.close(fig)
+
     print(f"[Task4] wrote {OUT}")
-    for N, s, f in zip(WINDOWS, savings, fprs):
-        print(f"[Task4] N={N} (df={residual_df(N)}): savings={s:.1f}%  FPR={f:.2f}%")
-    fpr3, fpr5, sav5 = fprs[0], fprs[2], savings[2]
-    print(f"[Task4] N=3 FPR={fpr3:.2f}% (need >12%), N=5 FPR={fpr5:.2f}% (need <5%), N=5 savings={sav5:.0f}% (need >35)")
-    assert fpr3 > 12, "N=3 (1 residual df) must produce >12% false halts"
-    assert fpr5 < 5.0, "N=5 must stabilize false halts below 5%"
-    assert sav5 > 35, "N=5 must retain >35% token savings"
-    print("[Task4] OK: N=3 → high false halts (1 df); N=5 → stable <5% FPR, >35% savings\n")
+    for n, s, f in zip(WINDOWS, savings, fprs):
+        print(f"[Task4] N={n} (df={max(n - 2, 1)}): savings={s:.1f}%  false-decision={f:.2f}%")
+    f3, f5, s5 = fprs[0], fprs[2], savings[2]
+    print(f"[Task4] N=3 FDR={f3:.2f}% (need >12), N=5 FDR={f5:.2f}% (need <5), N=5 savings={s5:.0f}% (need >35)")
+    assert f3 > 12, f"N=3 must mis-decide >12% of the time (1 residual df), got {f3:.1f}%"
+    assert f5 < 5.0, f"N=5 must stabilize the decision below 5%, got {f5:.1f}%"
+    assert s5 > 35, f"N=5 must retain >35% token savings, got {s5:.0f}%"
+    print("[Task4] OK: N=3 → high false-decision rate; N=5 → <5% with >35% savings\n")
     return savings, fprs
 
 

@@ -1,19 +1,22 @@
 //! Userspace eBPF verifier: loads the kernel program, attaches the `connect`
-//! and `write` kprobes, and drains near-miss telemetry from the ringbuffer.
+//! and `openat` kprobes, and drains near-miss telemetry from the ringbuffer.
 //!
-//! This is the production replacement for the Task-1 userspace mock: instead of
-//! writing `near_misses.jsonl` to disk, events arrive zero-copy over a
-//! `BPF_MAP_TYPE_RINGBUF`.
+//! Production replacement for the userspace mock: events arrive zero-copy over
+//! a `BPF_MAP_TYPE_RINGBUF` (no `near_misses.jsonl` disk writes).
+//!
+//! Requires a privileged Linux host with `/sys/kernel/debug/tracing`; it is not
+//! built on macOS/dev hosts (see `README.md`).
 
-use aya::maps::ring_buf::{RingBuf, RingBufItem};
-use aya::programs::{KProbe, Lsm};
-use aya::{include_bytes_aligned, Bpf, Btf};
+use std::path::PathBuf;
+
+use aya::maps::ring_buf::RingBuf;
+use aya::programs::KProbe;
+use aya::{Btf, Ebpf};
 use aya_log::EbpfLogger;
 use clap::Parser;
 use log::{info, warn};
-use tokio::task;
 
-/// Must match the `NearMissEvent` layout in `ebpf-verifier-ebpf/src/main.rs`.
+/// Must match `NearMissEvent` in `ebpf-verifier-ebpf/src/main.rs`.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 struct NearMissEvent {
@@ -25,64 +28,75 @@ struct NearMissEvent {
     ts_ns: u64,
 }
 
+const EVENT_SIZE: usize = std::mem::size_of::<NearMissEvent>();
+
 #[derive(Parser)]
 struct Opt {
+    /// Path to the compiled eBPF object.
     #[arg(short, long)]
-    path: Option<std::path::PathBuf>,
+    path: PathBuf,
+    /// Exit after this many telemetry events (0 = run forever).
+    #[arg(short, long, default_value_t = 0)]
+    count: usize,
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let opt = Opt::parse();
 
-    let path = opt
-        .path
-        .unwrap_or_else(|| std::path::PathBuf::from("target/bpfel-unknown-none/release/ebpf-verifier"));
-    let bytes = std::fs::read(path)?;
-    let bpf_bytes = include_bytes_aligned!(bytes.as_slice());
+    let bytes = std::fs::read(&opt.path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", opt.path.display()))?;
 
-    // Load with BTF detection when available so the LSM program can attach.
+    // BTF is optional; attach proceeds without it if unavailable.
     let btf = Btf::from_sys_fs().ok();
-    let mut bpf = Bpf::load(&bpf_bytes, btf)?;
-    EbpfLogger::init(&mut bpf)?;
+    let mut ebpf = Ebpf::load(&bytes, btf)?;
+    if let Err(e) = EbpfLogger::init(&mut ebpf) {
+        warn!("eBPF logger init failed (continuing): {e}");
+    }
 
-    // Attach kprobes on sys_enter_connect and sys_enter_write.
-    let prog: &mut KProbe = bpf.program_mut("sys_enter_connect").unwrap().try_into()?;
-    prog.load()?;
-    prog.attach("sys_enter_connect")?;
-    info!("attached kprobe sys_enter_connect");
+    for (prog_name, hook) in [("sys_enter_connect", "sys_enter_connect"), ("sys_enter_openat", "sys_enter_openat")] {
+        let prog: &mut KProbe = ebpf
+            .program_mut(prog_name)
+            .ok_or_else(|| anyhow::anyhow!("program {prog_name} not found"))?
+            .try_into()?;
+        prog.load()?;
+        prog.attach(hook)?;
+        info!("attached kprobe {hook}");
+    }
 
-    let prog: &mut KProbe = bpf.program_mut("sys_enter_write").unwrap().try_into()?;
-    prog.load()?;
-    prog.attach("sys_enter_write")?;
-    info!("attached kprobe sys_enter_write");
+    info!("verifier attached; draining ringbuf");
+    let mut rb = RingBuf::try_from(
+        ebpf.take_map("NEAR_MISS_RINGBUF")
+            .ok_or_else(|| anyhow::anyhow!("NEAR_MISS_RINGBUF map not found"))?,
+    )?;
 
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(prog) = bpf.program_mut("canary_lsm") {
-            let m: &mut Lsm = prog.try_into()?;
-            m.load()?;
-            m.attach("handle_file_open")?;
+    let mut seen = 0usize;
+    loop {
+        match rb.next() {
+            Some(item) => {
+                if item.len() >= EVENT_SIZE {
+                    let raw = item.as_ref();
+                    let ev: NearMissEvent = unsafe {
+                        std::ptr::read_unaligned(raw.as_ptr() as *const NearMissEvent)
+                    };
+                    info!(
+                        "event pid={} tid={} kind={} tier={} digest=0x{:x}",
+                        ev.pid, ev.tid, ev.kind, ev.tier, ev.token_digest
+                    );
+                    seen += 1;
+                    if opt.count != 0 && seen >= opt.count {
+                        info!("reached event count {seen}; exiting");
+                        break;
+                    }
+                }
+            }
+            None => {
+                // No event pending: block briefly instead of burning a core in a
+                // hot spin (the previous implementation called yield_now() in a
+                // tight loop and pinned a CPU at 100%).
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
-
-    info!("verifier attached; draining telemetry ringbuf");
-    drain_ringbuf_async(&mut bpf)?;
-    Ok(())
-}
-
-async /// Blocking poll loop that reads `NearMissEvent`s from the ring buffer.
-/// The concrete `RingBuf::set_reader()` + `rb.next()` wiring is version-specific
-/// across aya releases, so it is completed on the eBPF build host.
-pub fn drain_ringbuf_loop() {
-    loop {
-        // poll ringbuffer; parse NearMissEvent; forward to harness-pipeline
-        std::thread::yield_now();
-    }
-}
-
-async fn drain_ringbuf_async(_bpf: &mut Bpf) -> anyhow::Result<()> {
-    let consumer = task::spawn_blocking(drain_ringbuf_loop);
-    consumer.await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
 }

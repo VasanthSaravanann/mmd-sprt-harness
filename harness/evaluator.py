@@ -32,12 +32,23 @@ def inverse_propensity_weight(select_prob: float) -> float:
 
 
 def winsorize(weights: Sequence[float], p: float = 0.99) -> List[float]:
-    """Cap weights at the ``p``-th percentile (P99 by default)."""
+    """Cap weights at the ``p``-th percentile (P99 by default).
+
+    Uses the lower percentile rank ``floor(p * (n - 1))`` so that the top
+    ``(1 - p)`` fraction of weights is genuinely clamped.  Using ``ceil`` would
+    land on the maximum element for common ``p`` (e.g. ``p=0.99, n=100`` ->
+    index 99) and silently leave outliers untouched.
+    """
     w = list(weights)
     if not w:
         return w
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"winsorization p must be in (0, 1), got {p}")
+    n = len(w)
+    if n == 1:
+        return w
     sorted_w = sorted(w)
-    idx = min(len(sorted_w) - 1, int(math.ceil(p * (len(sorted_w) - 1))))
+    idx = min(n - 2, int(math.floor(p * (n - 1))))
     cap = sorted_w[idx]
     return [min(x, cap) for x in w]
 

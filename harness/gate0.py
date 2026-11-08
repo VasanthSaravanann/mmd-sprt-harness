@@ -30,14 +30,25 @@ NGRAM_N = 3
 # while intra-production dispersion stays well below the MMD floor.
 SIGMA_BW = 0.15
 
+# Sentinel used to zero-pad streams shorter than `n` tokens (mirrors the Rust
+# `[u8; NGRAM_N]` zero-padding so both implementations agree exactly).
+PAD_TOKEN = "\x00"
+
 
 # --------------------------------------------------------------------------
 # Tokenization / feature helpers
 # --------------------------------------------------------------------------
 def ngrams(tokens: Sequence[str], n: int = NGRAM_N) -> List[tuple]:
-    """Extract overlapping character-level `n`-grams over token labels."""
+    """Extract overlapping character-level `n`-grams over token labels.
+
+    Streams shorter than ``n`` are zero-padded with :data:`PAD_TOKEN` and emit a
+    single gram, matching the Rust `spectrum` implementation so cross-language
+    results agree exactly.  (Previous behaviour emitted a mix of bare tokens and
+    tuples for short streams, which made the action set inconsistent.)
+    """
     if len(tokens) < n:
-        return [(t, tuple(tokens)) for t in tokens]
+        padded = tuple(list(tokens) + [PAD_TOKEN] * (n - len(tokens)))
+        return [padded]
     return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
 
 

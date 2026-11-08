@@ -69,14 +69,16 @@ fn ringbuf_deser(c: &mut Criterion) {
     let bytes: Vec<u8> = unsafe {
         std::slice::from_raw_parts((&ev as *const NearMissEvent) as *const u8, std::mem::size_of::<NearMissEvent>())
     }.to_vec();
+    let bytes = criterion::black_box(bytes);
     c.bench_function("ringbuf_deserialize_events/s", |b| {
         b.iter(|| {
-            bytes
-                .chunks_exact(std::mem::size_of::<NearMissEvent>())
+            let buf = criterion::black_box(bytes.as_slice());
+            buf.chunks_exact(std::mem::size_of::<NearMissEvent>())
                 .map(|chunk| unsafe {
-                    std::ptr::read_unaligned(chunk.as_ptr() as *const NearMissEvent).token_digest
+                    let ev = std::ptr::read_unaligned(chunk.as_ptr() as *const NearMissEvent);
+                    ev.token_digest ^ ev.ts_ns ^ ev.pid as u64
                 })
-                .sum::<u64>()
+                .fold(0u64, |a, x| a.wrapping_add(x))
         })
     });
 }

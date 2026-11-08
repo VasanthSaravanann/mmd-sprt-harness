@@ -94,3 +94,32 @@ def test_constants():
     assert N_EFF_MIN == 30
     assert R_MIN == 0.85
     assert P_MAX == 0.01
+
+# --------------------------------------------------------------------------
+# Regression: winsorize must actually cap the top (1 - p) fraction.
+# Previously it used ceil(p*(n-1)) which landed on the maximum element for
+# p=0.99, leaving outliers untouched (a silent no-op).
+# --------------------------------------------------------------------------
+def test_winsorize_actually_caps_single_outlier():
+    weights = [1.0] * 99 + [1e9]
+    capped = winsorize(weights, 0.99)
+    assert max(capped) == 1.0, "single outlier must be clamped to P99"
+
+
+def test_winsorize_caps_top_one_percent_general():
+    # 1..1000: the top 1% (values 992..1000) must all be capped to <= P99.
+    import math
+    weights = [float(i) for i in range(1, 1001)]
+    capped = winsorize(weights, 0.99)
+    p99 = math.floor(0.99 * (len(weights) - 1))  # index of the cap value
+    assert max(capped) == float(p99 + 1), f"cap should be sorted[{p99}], got {max(capped)}"
+
+
+def test_winsorize_rejects_invalid_p():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        winsorize([1.0, 2.0, 3.0], 1.0)
+
+
+def test_winsorize_single_element_is_unchanged():
+    assert winsorize([5.0], 0.99) == [5.0]
