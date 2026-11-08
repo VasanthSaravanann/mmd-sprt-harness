@@ -42,7 +42,9 @@ struct Opt {
     count: usize,
 }
 
-fn main() -> anyhow::Result<()> {
+// EbpfLogger::init spawns a tokio task internally, so main must be async.
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let opt = Opt::parse();
 

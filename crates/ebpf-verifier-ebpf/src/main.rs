@@ -23,11 +23,14 @@
 #![no_std]
 #![no_main]
 
+// aya-ebpf 0.1.1 renamed KProbeContext to ProbeContext, and the regs() method
+// is now a field (ctx.regs).  EbpfContext provides pid() / tgid().
 use aya_ebpf::bindings::pt_regs;
 use aya_ebpf::helpers::{bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_send_signal};
 use aya_ebpf::macros::{kprobe, map};
 use aya_ebpf::maps::RingBuf;
-use aya_ebpf::programs::KProbeContext;
+use aya_ebpf::programs::ProbeContext;
+use aya_ebpf::EbpfContext;
 use aya_log_ebpf::info;
 
 /// Telemetry event emitted to userspace (must match the userspace mirror).
@@ -59,10 +62,11 @@ const FILENAME_BUF: usize = 64;
 const SIGKILL: u32 = 9;
 
 #[inline(always)]
-fn emit(ctx: &KProbeContext, kind: u32, tier: u32, digest: u64) {
+// BPF convention: pid() = thread id, tgid() = process id.
+fn emit(ctx: &ProbeContext, kind: u32, tier: u32, digest: u64) {
     let event = NearMissEvent {
-        pid: ctx.pid(),
-        tid: ctx.tid(),
+        pid: ctx.tgid(),  // process id
+        tid: ctx.pid(),   // thread id
         kind,
         tier,
         token_digest: digest,
@@ -86,9 +90,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Read the `openat` filename argument (x86_64 syscall arg 1 = `rsi`).
+/// The x86_64 `pt_regs` struct uses the field name `si` (not `rsi`).
 #[inline(always)]
-unsafe fn read_openat_filename(ctx: &KProbeContext) -> [u8; FILENAME_BUF] {
-    let regs: &pt_regs = ctx.regs();
+unsafe fn read_openat_filename(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
+    let regs: &pt_regs = &*ctx.regs;
     let arg_ptr = regs.si as *const u8;
     let mut buf = [0u8; FILENAME_BUF];
     let _ = bpf_probe_read_user_str_bytes(arg_ptr, &mut buf);
@@ -121,8 +126,8 @@ fn is_canary_path(buf: &[u8; FILENAME_BUF]) -> bool {
 /// The userspace loader attaches this program to the kernel symbol
 /// `__x64_sys_connect` (the function name here is just the eBPF program label).
 #[kprobe]
-pub fn sys_enter_connect(ctx: KProbeContext) -> u32 {
-    info!(&ctx, "connect pid={} tid={}", ctx.pid(), ctx.tid());
+pub fn sys_enter_connect(ctx: ProbeContext) -> u32 {
+    info!(&ctx, "connect pid={} tid={}", ctx.tgid(), ctx.pid());
     emit(&ctx, 0, 2, 0);
     0
 }
@@ -133,7 +138,7 @@ pub fn sys_enter_connect(ctx: KProbeContext) -> u32 {
 /// user-space filename pointer (syscall arg 1).  We read the path into a
 /// bounded buffer and compare it against the canary path.
 #[kprobe]
-pub fn sys_enter_openat(ctx: KProbeContext) -> u32 {
+pub fn sys_enter_openat(ctx: ProbeContext) -> u32 {
     let filename = unsafe { read_openat_filename(&ctx) };
     if is_canary_path(&filename) {
         let digest = fnv1a(CANARY_PATH);
