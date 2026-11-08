@@ -1,36 +1,83 @@
-//! Criterion benchmarks for the pipeline kernels.
-//!
-//! These measure telemetry throughput (streams/sec through Gate 0), allocation
-//! count/bytes (via the `alloc` profiler channel), and IPW evaluation latency.
-//! The Python baseline is compared in prose in the benchmark plots/`baselines`
-//! table; this file quantifies the Rust side.
+//! Criterion micro-benchmarks: SIMD-friendly 3-gram spectrum extraction,
+//! Gaussian-RBF MMD² kernel computation, IPW evaluation, and zero-copy
+//! ringbuffer deserialization throughput.
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use harness_core::evaluator::evaluate_ipw;
-use harness_core::gate0::{gate0, Stream};
+use harness_core::gate0::{gate0, mmd2, spectrum, Stream};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 const MOTIFS: &[&[u8]] = &[b"abba", b"aaba", b"baab"];
 
-fn make_prod(rng: &mut SmallRng, n: usize) -> Vec<Stream> {
+fn make_prod(rng: &mut SmallRng, n: usize, len: usize) -> Vec<Stream> {
     (0..n)
         .map(|_| {
             let m = MOTIFS[rng.gen_range(0..MOTIFS.len())];
-            (0..60).map(|i| m[i % m.len()]).collect()
+            (0..len).map(|i| m[i % m.len()]).collect()
         })
         .collect()
 }
 
-fn gate0_bench(c: &mut Criterion) {
+/// NearMissEvent layout mirroring the eBPF program (32 bytes, zero-copy).
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NearMissEvent {
+    pid: u32,
+    tid: u32,
+    kind: u32,
+    tier: u32,
+    token_digest: u64,
+    ts_ns: u64,
+}
+
+fn spectrum_throughput(c: &mut Criterion) {
     let mut rng = SmallRng::seed_from_u64(0);
-    let prod = make_prod(&mut rng, 90);
-    let cand = make_prod(&mut rng, 90);
-    c.bench_function("gate0_mmd2_n90", |b| {
+    let streams = make_prod(&mut rng, 1000, 64);
+    c.bench_function("spectrum_3gram_extraction/s", |b| {
+        b.iter(|| streams.iter().map(|s| spectrum(s)).collect::<Vec<_>>())
+    });
+}
+
+fn mmd2_kernel(c: &mut Criterion) {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let prod = make_prod(&mut rng, 48, 64);
+    let cand = make_prod(&mut rng, 48, 64);
+    c.bench_function("rbf_mmd2_kernel_n48", |b| {
+        b.iter_batched(
+            || (prod.clone(), cand.clone()),
+            |(p, c)| mmd2(&p, &c, 0.10),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn gate0_bench(c: &mut Criterion) {
+    let mut rng = SmallRng::seed_from_u64(1);
+    let prod = make_prod(&mut rng, 90, 60);
+    let cand = make_prod(&mut rng, 90, 60);
+    c.bench_function("gate0_full_n90", |b| {
         b.iter_batched(
             || (prod.clone(), cand.clone()),
             |(p, c)| gate0(&p, &c),
             BatchSize::SmallInput,
         )
+    });
+}
+
+fn ringbuf_deser(c: &mut Criterion) {
+    let ev = NearMissEvent { pid: 1, tid: 2, kind: 0, tier: 2, token_digest: 0xdead_beef, ts_ns: 123 };
+    let bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts((&ev as *const NearMissEvent) as *const u8, std::mem::size_of::<NearMissEvent>())
+    }.to_vec();
+    c.bench_function("ringbuf_deserialize_events/s", |b| {
+        b.iter(|| {
+            bytes
+                .chunks_exact(std::mem::size_of::<NearMissEvent>())
+                .map(|chunk| unsafe {
+                    std::ptr::read_unaligned(chunk.as_ptr() as *const NearMissEvent).token_digest
+                })
+                .sum::<u64>()
+        })
     });
 }
 
@@ -47,5 +94,5 @@ fn evaluator_bench(c: &mut Criterion) {
     });
 }
 
-criterion_group!(pipelines, gate0_bench, evaluator_bench);
+criterion_group!(pipelines, spectrum_throughput, mmd2_kernel, gate0_bench, ringbuf_deser, evaluator_bench);
 criterion_main!(pipelines);

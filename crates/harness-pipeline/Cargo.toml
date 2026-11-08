@@ -10,6 +10,8 @@ harness-core = { path = "../harness-core" }
 rayon.workspace = true
 tokio.workspace = true
 rand.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 criterion = { workspace = true }

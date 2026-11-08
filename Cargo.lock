@@ -624,6 +624,8 @@ dependencies = [
  "harness-core",
  "rand",
  "rayon",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
