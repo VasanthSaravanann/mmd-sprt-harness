@@ -124,24 +124,113 @@ fn average_ranks(data: &[f64]) -> Vec<f64> {
     ranks
 }
 
-/// Two-sided standard-normal p-value for a correlation t-statistic.
-///
-/// `erfc(z/sqrt(2))` is the two-sided normal tail `2*P(N(0,1) > |z|)`.  The
-/// previous implementation returned `0.5 * erfc(...)` — a ONE-sided p-value
-/// exactly half of Python's two-sided result, which could flip the `p < 0.01`
-/// gate across languages for the same data.
-fn norm_two_tail(z: f64) -> f64 {
-    // erfc(z) = 1 - erf(z); use the stable complement form.
-    1.0 - erf(z / 2f64.sqrt())
+/// Natural log of the gamma function (Lanczos approximation, g = 7, n = 9).
+fn ln_gamma(x: f64) -> f64 {
+    const G: f64 = 7.0;
+    const C: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        // reflection formula
+        std::f64::consts::PI.ln()
+            - (std::f64::consts::PI * x).sin().abs().ln()
+            - ln_gamma(1.0 - x)
+    } else {
+        let x = x - 1.0;
+        let mut a = C[0];
+        for (i, &c) in C.iter().enumerate().skip(1) {
+            a += c / (x + i as f64);
+        }
+        let t = x + G + 0.5;
+        0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+    }
 }
 
-fn erf(x: f64) -> f64 {
-    // Abramowitz-Stegun 7.1.26 approximation.
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let poly = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
-    sign * (1.0 - poly * (-x * x).exp())
+/// Continued-fraction evaluation of the incomplete beta function.
+fn betacf(a: f64, b: f64, x: f64) -> f64 {
+    const MAXIT: usize = 200;
+    const EPS: f64 = 3.0e-16;
+    const FPMIN: f64 = 1.0e-300;
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < FPMIN {
+        d = FPMIN;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=MAXIT {
+        let m2 = 2 * m;
+        let m_f = m as f64;
+        let mut aa = m_f * (b - m_f) * x / ((qam + m2 as f64) * (a + m2 as f64));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+        aa = -(a + m_f) * (qab + m_f) * x / ((a + m2 as f64) * (qap + m2 as f64));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    h
+}
+
+/// Regularized incomplete beta function `I_x(a, b)`.
+fn betai(a: f64, b: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let bt = (ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (1.0 - x).ln()).exp();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        bt * betacf(a, b, x) / a
+    } else {
+        1.0 - bt * betacf(b, a, 1.0 - x) / b
+    }
+}
+
+/// Exact two-sided Student-t p-value via the regularized incomplete beta:
+/// `p = I_{dof/(dof + t^2)}(dof/2, 1/2)`.
+///
+/// Matches the Python `student_t_two_tail` exactly (the previous Rust version
+/// used a normal approximation and an earlier revision even returned a
+/// one-sided value, either of which could flip the `p < 0.01` gate across
+/// languages).
+pub fn student_t_two_tail(t: f64, dof: f64) -> f64 {
+    if dof <= 0.0 {
+        return 1.0;
+    }
+    let x = dof / (dof + t * t);
+    betai(dof / 2.0, 0.5, x)
 }
 
 /// Weighted Spearman (rank-based IPW) correlation `(r, p)`.
@@ -184,7 +273,7 @@ pub fn weighted_pearson_corr(x: &[f64], y: &[f64], weights: &[f64]) -> (f64, f64
     let n_eff = effective_sample_size(weights);
     let dof = (n_eff - 1.0).max(1.0);
     let t = r * (dof / (1.0 - r * r)).sqrt();
-    let p = norm_two_tail(t.abs());
+    let p = student_t_two_tail(t.abs(), dof);
     (r, p)
 }
 
@@ -208,7 +297,9 @@ pub fn assemble_combined(
     let mut y = Vec::new();
     let mut w = Vec::new();
 
-    let keep = ((prod_x.len() as f64) * PROD_FRACTION).round() as usize;
+    // floor(x + 0.5) rather than `f64::round`'s half-away-from-zero, to match
+    // the Python implementation exactly on .5 boundaries.
+    let keep = ((prod_x.len() as f64) * PROD_FRACTION + 0.5).floor() as usize;
     let keep = keep.clamp(1, prod_x.len());
     // Deterministic seeded partial Fisher-Yates: sample `keep` distinct indices.
     let mut indices: Vec<usize> = (0..prod_x.len()).collect();

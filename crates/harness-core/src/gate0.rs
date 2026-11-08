@@ -29,6 +29,8 @@ pub struct Gate0Result {
     pub eps_prod: f64,
     pub d_act: f64,
     pub cosine_dist: f64,
+    /// Canonical status token: `GATE0_PASS` or `GATE0_FAIL`.
+    pub status: &'static str,
     pub passed: bool,
     pub reason: String,
 }
@@ -201,8 +203,9 @@ pub fn gate0(prod: &[Stream], cand: &[Stream]) -> Gate0Result {
     let d_act = action_jaccard_distance(cand, prod);
     let cosine = cosine_distance(&mean_embedding(cand), &mean_embedding(prod));
 
-    let (passed, reason) = if mmd2 > eps_prod {
+    let (status, passed, reason) = if mmd2 > eps_prod {
         (
+            "GATE0_FAIL",
             false,
             format!(
                 "GATE0_FAIL: MMD^2={:.4} > eps_prod={:.4} (distribution shift / tail exfiltration)",
@@ -211,11 +214,16 @@ pub fn gate0(prod: &[Stream], cand: &[Stream]) -> Gate0Result {
         )
     } else if d_act >= D_ACT_THRESHOLD {
         (
+            "GATE0_FAIL",
             false,
             format!("GATE0_FAIL: Action Jaccard D_act={:.4} >= 0.05", d_act),
         )
     } else {
-        (true, "GATE0_PASS: distributionally aligned with production".to_string())
+        (
+            "GATE0_PASS",
+            true,
+            "GATE0_PASS: distributionally aligned with production".to_string(),
+        )
     };
 
     Gate0Result {
@@ -223,6 +231,7 @@ pub fn gate0(prod: &[Stream], cand: &[Stream]) -> Gate0Result {
         eps_prod,
         d_act,
         cosine_dist: cosine,
+        status,
         passed,
         reason,
     }

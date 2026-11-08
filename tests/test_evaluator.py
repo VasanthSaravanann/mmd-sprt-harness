@@ -182,3 +182,38 @@ def test_production_subsample_reproducible_with_seed():
     x1, _, _ = assemble_combined(px, py, pp, ex, ey, ep, seed=42)
     x2, _, _ = assemble_combined(px, py, pp, ex, ey, ep, seed=42)
     assert x1 == x2
+
+
+# --------------------------------------------------------------------------
+# Regression: student_t_two_tail must match scipy exactly (the Rust and Python
+# implementations now share this algorithm; previously Python integrated the
+# density numerically and Rust used a normal approximation).
+# --------------------------------------------------------------------------
+def test_student_t_two_tail_matches_scipy():
+    scipy_stats = pytest.importorskip("scipy.stats")
+    from harness.evaluator import student_t_two_tail
+    for t, dof in [(1.5, 10), (2.0, 29), (2.58, 29), (3.0, 5), (0.5, 100)]:
+        mine = student_t_two_tail(t, dof)
+        ref = 2.0 * scipy_stats.t.sf(abs(t), dof)
+        assert mine == pytest.approx(ref, abs=1e-12), f"t={t} dof={dof}"
+
+
+def test_student_t_two_tail_is_two_sided():
+    from harness.evaluator import student_t_two_tail
+    # p is symmetric in t and < 1
+    assert student_t_two_tail(2.0, 29) == pytest.approx(student_t_two_tail(-2.0, 29))
+    assert student_t_two_tail(0.0, 29) == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------
+# Regression: the 1% production subsample size uses floor(x + 0.5) so the row
+# count matches Rust on .5 boundaries (Python's round() is banker's rounding:
+# round(2.5)=2 while Rust's f64::round is half-away-from-zero: 2.5->3).
+# --------------------------------------------------------------------------
+def test_production_keep_uses_half_up_rounding():
+    from harness.evaluator import assemble_combined
+    prod_n = 250  # 250 * 0.01 = 2.5 -> half-up gives 3
+    px = list(range(prod_n)); py = list(range(prod_n)); pp = [0.01] * prod_n
+    ex = [0.0] * 4; ey = [0.0] * 4; ep = [0.4] * 4
+    x, _, _ = assemble_combined(px, py, pp, ex, ey, ep, seed=1)
+    assert len(x) == 4 + 3, f"expected 3 production rows, got {len(x) - 4}"

@@ -140,3 +140,19 @@ def test_gate0_degenerate_single_prod_does_not_bypass():
 
 def test_mmd2_both_empty_is_zero_not_inf():
     assert mmd2_3gram([], []) == 0.0
+
+
+# --------------------------------------------------------------------------
+# Regression: Gate 0 must expose a canonical status token (GATE0_PASS /
+# GATE0_FAIL) so every stage reports a uniform verdict string, and the running
+# table in the README matches.  The old implementation only had a free-form
+# reason with no token.
+# --------------------------------------------------------------------------
+def test_gate0_status_tokens():
+    prod = _make_production()
+    ok = gate0(prod, _healthy_candidate(prod))
+    bad = gate0(prod, _exfil_candidate(prod))
+    assert ok.status == "GATE0_PASS"
+    assert ok.reason.startswith("GATE0_PASS:")
+    assert bad.status == "GATE0_FAIL"
+    assert bad.reason.startswith("GATE0_FAIL:")

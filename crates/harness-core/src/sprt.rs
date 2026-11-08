@@ -28,6 +28,9 @@ pub enum Verdict {
     Pass,
     InsufficientFitHalt,
     BudgetExhaustedConverging,
+    /// Fewer than `WINDOW_MIN` points: no fit is possible yet.  Mirrors the
+    /// Python `"NEEDS_MORE_DATA"` pre-fit verdict.
+    NeedsMoreData,
 }
 
 impl Verdict {
@@ -36,6 +39,7 @@ impl Verdict {
             Verdict::Pass => "PASS",
             Verdict::InsufficientFitHalt => "INSUFFICIENT_FIT_HALT",
             Verdict::BudgetExhaustedConverging => "BUDGET_EXHAUSTED_CONVERGING",
+            Verdict::NeedsMoreData => "NEEDS_MORE_DATA",
         }
     }
 }
@@ -75,15 +79,24 @@ pub fn logit_entropy(prob: f64) -> f64 {
 /// Fit `d^(i) = beta_0 * exp(-lambda * i)` over a rolling `N >= 5` window.
 ///
 /// Points are indexed from `i = 0..N-1`; `d6` is the extrapolated value at
-/// iteration `i = 6`.  Requires strictly positive distances.
+/// iteration `i = 6`.
+///
+/// Windows shorter than [`WINDOW_MIN`] do **not** panic: they return a fit with
+/// `Verdict::NeedsMoreData` and NaN parameters, mirroring the Python
+/// implementation.  Non-positive distances are still rejected (a fit of a
+/// non-positive value is undefined).
 pub fn fit_exponential_decay(distances: &[f64]) -> DecayFit {
     let n = distances.len();
-    assert!(
-        n >= WINDOW_MIN,
-        "exponential decay requires at least {} points, got {}",
-        WINDOW_MIN,
-        n
-    );
+    if n < WINDOW_MIN {
+        return DecayFit {
+            beta_0: f64::NAN,
+            lam: f64::NAN,
+            r2: f64::NAN,
+            d6: f64::NAN,
+            rd_verdict: Verdict::NeedsMoreData,
+            converged: false,
+        };
+    }
     assert!(
         distances.iter().all(|v| *v > 0.0),
         "exponential decay requires strictly positive distances"

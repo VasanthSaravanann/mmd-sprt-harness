@@ -52,7 +52,7 @@ impl PipelineReport {
     pub fn stage_summary(&self) -> String {
         format!(
             "gate0={}, sprt={}, spr_rounds={}, evaluator={}",
-            self.gate0.as_ref().map(|g| g.passed.to_string()).unwrap_or_else(|| "n/a".into()),
+            self.gate0.as_ref().map(|g| g.status.to_string()).unwrap_or_else(|| "n/a".into()),
             self.sprt.as_ref().map(|s| s.rd_verdict.as_str().to_string()).unwrap_or_else(|| "n/a".into()),
             self.spr_loop.as_ref().map(|s| s.k_used.to_string()).unwrap_or_else(|| "n/a".into()),
             self.evaluator.as_ref().map(|e| e.status.to_string()).unwrap_or_else(|| "n/a".into()),

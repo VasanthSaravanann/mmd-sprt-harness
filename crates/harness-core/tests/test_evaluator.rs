@@ -199,3 +199,49 @@ fn production_subsample_reproducible_with_seed() {
     let (x2, _, _) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 42);
     assert_eq!(x1, x2);
 }
+
+// Cross-language parity: Rust's exact two-sided Student-t p-value must match
+// Python's `student_t_two_tail` and scipy.stats.t.sf.  Reference values below
+// are the scipy `2 * t.sf(t, dof)` outputs.
+#[test]
+fn student_t_two_tail_matches_reference() {
+    let cases = [
+        (1.5_f64, 10.0_f64, 0.16450732984604918_f64),
+        (2.0, 29.0, 0.05494364249891494),
+        (2.58, 29.0, 0.015212246881334812),
+        (3.0, 5.0, 0.03009925008421135),
+        (0.5, 100.0, 0.6181735717775068),
+    ];
+    for (t, dof, expected) in cases {
+        let got = student_t_two_tail(t, dof);
+        assert!(
+            (got - expected).abs() < 1e-7,
+            "p(t={t}, dof={dof}) = {got}, expected {expected}"
+        );
+    }
+}
+
+// Perfect monotone correlation -> r = 1 -> p = 0.
+#[test]
+fn perfect_correlation_has_zero_p() {
+    let x: Vec<f64> = (0..30).map(|i| i as f64).collect();
+    let y = x.clone();
+    let w = vec![1.0; 30];
+    let (_r, p) = weighted_spearman_corr(&x, &y, &w);
+    assert!(p < 1e-9, "perfect correlation must yield p ~ 0, got {p}");
+}
+
+// Regression: the 1% production subsample size uses floor(x + 0.5) so the row
+// count matches Python on .5 boundaries (250 * 0.01 = 2.5 -> 3).
+#[test]
+fn production_keep_uses_half_up_rounding() {
+    let prod_n = 250usize;
+    let px: Vec<f64> = (0..prod_n).map(|i| i as f64).collect();
+    let py = px.clone();
+    let pp = vec![0.01; prod_n];
+    let ex = vec![0.0; 4];
+    let ey = vec![0.0; 4];
+    let ep = vec![0.4; 4];
+    let (x, _, _) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 1);
+    assert_eq!(x.len(), 4 + 3, "expected 3 production rows");
+}

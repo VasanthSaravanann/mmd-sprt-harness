@@ -57,7 +57,8 @@ def run_pipeline(system: SystemUnderTest,
     # 1. Gate 0 distributional attestation.
     prod, cand = system.projection
     g0 = gate0(prod, cand)
-    stages.append(StageReport("gate0", g0.passed, g0.reason, g0))
+    # Detail carries the canonical status token (uniform with the other stages).
+    stages.append(StageReport("gate0", g0.passed, g0.status, g0))
 
     # 2. Prior-anchored SPRT convergence.
     sprt = assess_convergence(system.sprt_distances)

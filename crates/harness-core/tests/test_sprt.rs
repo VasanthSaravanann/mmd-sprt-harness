@@ -19,10 +19,21 @@ fn reference_halt_sequence() {
     assert!(fit.r2 < R2_THRESHOLD);
 }
 
+// Short windows no longer panic: they return a NEEDS_MORE_DATA fit, matching
+// the Python implementation.
 #[test]
-#[should_panic(expected = "at least 5 points")]
-fn needs_window_of_five() {
-    let _ = assess_convergence(&[0.5, 0.4, 0.3, 0.2]);
+fn short_window_reports_needs_more_data() {
+    let fit = assess_convergence(&[0.5, 0.4, 0.3, 0.2]);
+    assert_eq!(fit.rd_verdict, Verdict::NeedsMoreData);
+    assert!(!fit.converged);
+    assert!(fit.r2.is_nan());
+    assert_eq!(Verdict::NeedsMoreData.as_str(), "NEEDS_MORE_DATA");
+}
+
+#[test]
+fn nonpositive_distance_still_panics() {
+    let r = std::panic::catch_unwind(|| assess_convergence(&[0.5, 0.4, 0.0, 0.2, 0.1]));
+    assert!(r.is_err(), "non-positive distances must be rejected");
 }
 
 #[test]

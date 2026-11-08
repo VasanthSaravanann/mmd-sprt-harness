@@ -125,28 +125,83 @@ def weighted_correlation(x: Sequence[float], y: Sequence[float],
         return (r, 0.0)
     dof = welch_t_approximation(n_eff)
     t_stat = r * math.sqrt(dof / (1.0 - r * r))
-    p = 2.0 * _survival_t(dof, abs(t_stat))
+    p = student_t_two_tail(abs(t_stat), dof)
     return (r, p)
 
 
-def _survival_t(dof: float, t: float) -> float:
-    """Two-sided Student-t survival by numerical integration (normal approx)."""
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued-fraction evaluation of the incomplete beta function."""
+    MAXIT = 200
+    EPS = 3.0e-16
+    FPMIN = 1.0e-300
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
+
+
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b)."""
     from math import lgamma
-    if dof > 120:
-        # normal approximation
-        return 0.5 * math.erfc(t / math.sqrt(2.0))
-    steps = 4000
-    xstart = t
-    xend = 40.0
-    if xstart >= xend:
+    if x <= 0.0:
         return 0.0
-    dx = (xend - xstart) / steps
-    s = 0.0
-    half = lgamma((dof + 1) / 2) - lgamma(dof / 2) - 0.5 * math.log(dof * math.pi)
-    for i in range(steps):
-        xi = xstart + (i + 0.5) * dx
-        s += dx * math.exp(half - (dof + 1) / 2 * math.log(1 + xi * xi / dof))
-    return s
+    if x >= 1.0:
+        return 1.0
+    bt = math.exp(
+        lgamma(a + b) - lgamma(a) - lgamma(b) + a * math.log(x) + b * math.log(1.0 - x)
+    )
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_two_tail(t: float, dof: float) -> float:
+    """Exact two-sided Student-t p-value via the regularized incomplete beta.
+
+    ``p = I_{dof/(dof + t^2)}(dof/2, 1/2)``.  This is the same algorithm used by
+    the Rust implementation, so both languages return identical p-values (the
+    previous Python version integrated the density numerically while Rust used a
+    normal approximation, which could flip the ``p < 0.01`` gate across
+    languages for small ``n_eff``).
+    """
+    if dof <= 0.0:
+        return 1.0
+    x = dof / (dof + t * t)
+    return _betai(dof / 2.0, 0.5, x)
+
+
+def _survival_t(dof: float, t: float) -> float:
+    """One-sided Student-t survival ``P(T > t)`` (= half the two-sided p)."""
+    return 0.5 * student_t_two_tail(t, dof)
 
 
 # --------------------------------------------------------------------------
@@ -189,7 +244,9 @@ def assemble_combined(
 
     # Keep a 1% randomized subset of production.
     prod_n = len(prod_x)
-    keep = max(1, int(round(prod_n * PROD_FRACTION)))
+    # Use floor(x + 0.5) rather than Python's banker's-rounding round() so the
+    # row count matches the Rust implementation exactly on .5 boundaries.
+    keep = max(1, int(math.floor(prod_n * PROD_FRACTION + 0.5)))
     keep = min(keep, prod_n)
     rng = random.Random(seed)
     idxs = rng.sample(range(prod_n), keep)

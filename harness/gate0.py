@@ -145,13 +145,13 @@ class Gate0Result:
     eps_prod: float
     d_act: float
     cosine_dist: float
+    status: str
     passed: bool
     reason: str
 
 
 def gate0(prod_streams: Sequence[Sequence[str]],
-          cand_streams: Sequence[Sequence[str]],
-          seed: int = 0) -> Gate0Result:
+          cand_streams: Sequence[Sequence[str]]) -> Gate0Result:
     """Run the Gate 0 attestation on candidate vs production streams.
 
     Degenerate production sets are guarded: with 0 or 1 production streams the
@@ -183,9 +183,15 @@ def gate0(prod_streams: Sequence[Sequence[str]],
     passed = bool(dist_ok and act_ok)
 
     if not dist_ok:
-        reason = f"MMD^2={mmd2:.4f} > eps_prod={eps_prod:.4f} (distribution shift / tail exfiltration)"
+        status = "GATE0_FAIL"
+        reason = (
+            f"GATE0_FAIL: MMD^2={mmd2:.4f} > eps_prod={eps_prod:.4f} "
+            "(distribution shift / tail exfiltration)"
+        )
     elif not act_ok:
-        reason = f"Action Jaccard D_act={d_act:.4f} >= 0.05"
+        status = "GATE0_FAIL"
+        reason = f"GATE0_FAIL: Action Jaccard D_act={d_act:.4f} >= 0.05"
     else:
-        reason = "distributionally aligned with production"
-    return Gate0Result(mmd2, eps_prod, d_act, cosine, passed, reason)
+        status = "GATE0_PASS"
+        reason = "GATE0_PASS: distributionally aligned with production"
+    return Gate0Result(mmd2, eps_prod, d_act, cosine, status, passed, reason)
