@@ -123,3 +123,27 @@ def test_winsorize_rejects_invalid_p():
 
 def test_winsorize_single_element_is_unchanged():
     assert winsorize([5.0], 0.99) == [5.0]
+
+
+# --------------------------------------------------------------------------
+# Regression: evaluate_ipw must use a rank-based (Spearman) correlation to match
+# the Rust gate, not a Pearson correlation on the raw values.
+# --------------------------------------------------------------------------
+def test_evaluate_ipw_is_rank_based_not_pearson():
+    # Build data where a monotone-but-heteroscedastic relationship gives a
+    # perfect Spearman (rank) correlation but a weaker Pearson correlation.
+    n = 300
+    x = list(range(1, n + 1))
+    # perfect rank ordering (strictly increasing) but wildly non-linear scale
+    y = [float(v) ** 3 for v in x]
+    weights = [1.0] * n
+    from harness.evaluator import weighted_spearman_corr, weighted_correlation
+    r_spearman, _ = weighted_spearman_corr(x, y, weights)
+    r_pearson, _ = weighted_correlation(x, y, weights)
+    assert r_spearman == pytest.approx(1.0, abs=1e-9)
+    assert r_pearson < 0.99, "raw Pearson should be < 1 on cubic data"
+
+
+def test_average_ranks_ties_share_mean():
+    from harness.evaluator import _average_ranks
+    assert _average_ranks([1.0, 1.0, 3.0, 2.0]) == [1.5, 1.5, 4.0, 3.0]

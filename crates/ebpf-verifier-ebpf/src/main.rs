@@ -4,8 +4,9 @@
 //! * `sys_enter_openat`  kprobe  — **honeypot interceptor**.  `openat` carries
 //!   the user-space `filename` pointer, so this is the correct hook to detect
 //!   direct path access to `/tmp/canary_token.key`.  On a match the program
-//!   fires `bpf_send_signal(SIGKILL)` directly in-kernel (<10µs) and blocks the
-//!   call by returning a non-zero error.
+//!   fires `bpf_send_signal(SIGKILL)` directly in-kernel (<10µs).
+//!   Note: a kprobe cannot veto the syscall; the mitigation is the signal, not
+//!   the return code.
 //! * Near-miss events are emitted to userspace over a `BPF_MAP_TYPE_RINGBUF`
 //!   (zero-copy telemetry, replacing disk-bound `near_misses.jsonl`).
 //!
@@ -41,6 +42,14 @@ static RING: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 
 /// Honeypot path compared byte-wise (keep in sync with userspace).
 const CANARY_PATH: &[u8] = b"/tmp/canary_token.key";
+/// `openat`/`open` filename buffers are compared against the path **including**
+/// its NUL terminator so that `probe_read_user_str_bytes` output (always
+/// NUL-terminated) matches exactly and `prefix/openat2` variants cannot slip
+/// past a plain byte-equality check.
+const CANARY_PATH_Z: &[u8] = b"/tmp/canary_token.key\0";
+/// Buffer bound for the syscall filename read.  Must be `<= 512` and a power of
+/// two so the eBPF verifier accepts a constant-size, bounded comparison loop.
+const FILENAME_BUF: usize = 64;
 const SIGKILL: u32 = 9;
 
 #[inline(always)]
@@ -59,6 +68,7 @@ fn emit(ctx: &KProbeContext, kind: u32, tier: u32, digest: u64) {
 
 #[inline(always)]
 fn fnv1a(bytes: &[u8]) -> u64 {
+    // Unrolled with a constant bound so the verifier can prove termination.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut i = 0;
     while i < bytes.len() {
@@ -69,14 +79,35 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Read up to `CANARY_PATH.len()` bytes of the `openat` filename argument.
+/// Read the `openat` filename argument (x86_64 syscall arg 1 = `rsi`).
 #[inline(always)]
-unsafe fn read_openat_filename(ctx: &KProbeContext) -> [u8; CANARY_PATH.len()] {
+unsafe fn read_openat_filename(ctx: &KProbeContext) -> [u8; FILENAME_BUF] {
     let regs: &pt_regs = ctx.regs();
-    let arg_ptr = regs.si as *const u8; // x86_64 syscall arg 1 (filename)
-    let mut buf = [0u8; CANARY_PATH.len()];
+    let arg_ptr = regs.si as *const u8;
+    let mut buf = [0u8; FILENAME_BUF];
     let _ = bpf_probe_read_user_str_bytes(arg_ptr, &mut buf);
     buf
+}
+
+/// Return true if the (NUL-terminated) read buffer equals `CANARY_PATH`.
+#[inline(always)]
+fn is_canary_path(buf: &[u8; FILENAME_BUF]) -> bool {
+    // Compare against the NUL-terminated canary, bounded by FILENAME_BUF.
+    let mut i = 0;
+    while i < FILENAME_BUF {
+        let expected = if i < CANARY_PATH_Z.len() { CANARY_PATH_Z[i] } else { 0 };
+        if buf[i] != expected {
+            return false;
+        }
+        if buf[i] == 0 {
+            break;
+        }
+        i += 1;
+    }
+    // Reject prefix attacks: a canary prefix followed by extra bytes must not
+    // match.  `CANARY_PATH_Z` includes its NUL, so the comparison above already
+    // enforces that buf[CANARY_PATH.len()] == 0.
+    true
 }
 
 /// Kprobe on `sys_enter_connect` — Tier 2 telemetry.
@@ -91,14 +122,19 @@ pub fn sys_enter_connect(ctx: KProbeContext) -> u32 {
 #[kprobe]
 pub fn sys_enter_openat(ctx: KProbeContext) -> u32 {
     let filename = unsafe { read_openat_filename(&ctx) };
-    if filename == *CANARY_PATH {
-        let digest = fnv1a(&filename);
+    if is_canary_path(&filename) {
+        let digest = fnv1a(CANARY_PATH);
         emit(&ctx, 1, 1, digest);
-        // Kill the offending task from the kernel (SIGKILL), then abort the call.
+        // Kill the offending task from the kernel (SIGKILL).
+        //
+        // IMPORTANT: kprobes are debug hooks and **cannot abort the syscall**;
+        // a non-zero return value here is ignored by the kernel.  The mitigation
+        // is the SIGKILL itself, not a return-code veto.  (Blocking the syscall
+        // would require an LSM BPF hook / `bpf_lsm` program.)
         unsafe { bpf_send_signal(SIGKILL) };
-        return 1; // non-zero -> make the syscall fail fast
+        return 1;
     }
-    emit(&ctx, 0, 2, fnv1a(&filename));
+    emit(&ctx, 0, 2, 0);
     0
 }
 

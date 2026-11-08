@@ -1,11 +1,11 @@
 {
-  "spectrum_events_per_sec": 479265.3642388872,
-  "mmd2_per_sec": 1469.3181105397894,
-  "mmd2_usec_per_call": 680.5878133718953,
-  "ringbuf_events_per_sec": 2363414389.109008,
-  "gate0_events_per_sec": 330.4669602437818,
+  "spectrum_events_per_sec": 484111.1828108037,
+  "mmd2_per_sec": 1043.4096036872797,
+  "mmd2_usec_per_call": 958.3963924293244,
+  "ringbuf_events_per_sec": 2042233666.4478538,
+  "gate0_events_per_sec": 210.72960969760086,
   "note": "Rust native (release) microbenchmarks; compare against the Python NumPy baseline proportionally.",
-  "rust_vs_python_ref_ratio": 32.36411902702079,
-  "python_ref_mmd2_calls_per_sec": 45.39960161786132,
-  "numpy_mmd2_calls_per_sec": 10843.414319849286
+  "rust_vs_python_ref_ratio": 22.91798106583047,
+  "python_ref_mmd2_calls_per_sec": 45.52798960301742,
+  "numpy_mmd2_calls_per_sec": 9347.705434817404
 }

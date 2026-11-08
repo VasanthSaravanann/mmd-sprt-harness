@@ -117,3 +117,18 @@ fn winsorize_rejects_invalid_p() {
 fn winsorize_single_element_unchanged() {
     assert_eq!(winsorize(&[5.0], 0.99), vec![5.0]);
 }
+
+// Regression: NaN weights must not panic (Rust's partial_cmp().unwrap() used to
+// panic on NaN, while Python returned the values unchanged).
+#[test]
+fn winsorize_is_nan_safe() {
+    let weights = [1.0, f64::NAN, 2.0];
+    let capped = winsorize(&weights, 0.99);
+    assert_eq!(capped.len(), 3);
+    // NaN is preserved (matching Python), never used as the cap.
+    assert!(capped[1].is_nan());
+    // With NaN excluded from the rank, non-NaN values are clamped to the
+    // P99-of-non-NaN cap (here = 1.0), mirroring the Python result [1.0, nan, 1.0].
+    assert_eq!(capped[0], 1.0);
+    assert_eq!(capped[2], 1.0);
+}

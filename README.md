@@ -81,7 +81,10 @@ a zero-copy `BPF_MAP_TYPE_RINGBUF`, kills the canary-accessor in the kernel via
 
 The Phase 4 winsorization uses the lower percentile rank `floor(p·(n−1))` so the
 top `1−p` fraction is genuinely capped (using `ceil` silently left outliers
-untouched).
+untouched), and it is NaN-safe in both Python and Rust (NaN entries are preserved,
+never used as the cap).  The correlation is a weighted **Spearman** (rank-based)
+in both implementations; an earlier Pearson-on-raw-values Python implementation
+was brought into line with the Rust gate.
 
 ## Known limitations
 

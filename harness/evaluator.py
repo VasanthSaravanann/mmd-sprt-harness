@@ -68,6 +68,34 @@ def welch_t_approximation(n_eff: float) -> float:
     return max(n_eff - 1.0, 1.0)
 
 
+def _average_ranks(values: Sequence[float]) -> List[float]:
+    """Average ranks with NaN-safe ordering (ties share the mean rank)."""
+    order = sorted(range(len(values)), key=lambda i: (values[i] != values[i], values[i]))
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        v = values[order[i]]
+        while j + 1 < len(order) and values[order[j + 1]] == v:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in order[i : j + 1]:
+            ranks[k] = avg
+        i = j + 1
+    return ranks
+
+
+def weighted_spearman_corr(x: Sequence[float], y: Sequence[float],
+                           weights: Sequence[float]) -> tuple:
+    """Weighted **Spearman** rank correlation ``(r, p)``.
+
+    Mirrors the Rust `weighted_spearman_corr`: rank both vectors, then compute a
+    weighted Pearson correlation on the ranks.  Using Pearson on the raw values
+    (as the old implementation did) diverges from the spec/Rust gate.
+    """
+    return weighted_correlation(_average_ranks(x), _average_ranks(y), weights)
+
+
 def weighted_correlation(x: Sequence[float], y: Sequence[float],
                          weights: Sequence[float]) -> tuple:
     """IPW-weighted Pearson correlation ``(r, p)``."""
@@ -184,7 +212,9 @@ def evaluate_ipw(
         eval_x, eval_y, eval_select_prob,
     )
     n_eff = effective_sample_size(weights)
-    r_ipw, p_value = weighted_correlation(x, y, weights)
+    # Use the weighted Spearman (rank) correlation to match the spec and the
+    # Rust implementation; see weighted_spearman_corr for rationale.
+    r_ipw, p_value = weighted_spearman_corr(x, y, weights)
 
     if n_eff < N_EFF_MIN:
         reason = f"n_eff={n_eff:.1f} < 30 (insufficient effective sample)"

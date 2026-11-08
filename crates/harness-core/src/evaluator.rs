@@ -54,11 +54,22 @@ pub fn winsorize(weights: &[f64], p: f64) -> Vec<f64> {
     if n == 1 {
         return weights.to_vec();
     }
+    // NaN-safe total ordering.  `partial_cmp(..).unwrap()` panics on NaN
+    // weights, whereas the Python implementation returns them unchanged.  We
+    // sort NaNs to the end (total_cmp fallback) and skip them when choosing the
+    // cap so a NaN never becomes the cap value.
     let mut sorted: Vec<f64> = weights.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let idx = (((p * (n - 1) as f64).floor()) as usize).min(n - 2);
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or_else(|| a.total_cmp(b)));
+    let non_nan = sorted.iter().filter(|v| !v.is_nan()).count();
+    let idx = if non_nan == 0 {
+        0
+    } else {
+        (((p * (non_nan - 1) as f64).floor()) as usize).min(non_nan - 1)
+    };
     let cap = sorted[idx];
-    weights.iter().map(|w| w.min(cap)).collect()
+    // Preserve NaN entries (min(NaN, cap) in Rust would return cap and silently
+    // replace them).
+    weights.iter().map(|w| if w.is_nan() { *w } else { w.min(cap) }).collect()
 }
 
 /// Kish's effective sample size `n_eff = (Σw)² / Σw²`.
@@ -71,10 +82,12 @@ pub fn effective_sample_size(weights: &[f64]) -> f64 {
     total * total / square_sum
 }
 
-/// Rank ties avenged average ranks (used for Spearman).
+/// Average ranks with NaN-safe ordering (used for Spearman).
 fn average_ranks(data: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..data.len()).collect();
-    order.sort_by(|a, b| data[*a].partial_cmp(&data[*b]).unwrap());
+    order.sort_by(|a, b| {
+        data[*a].partial_cmp(&data[*b]).unwrap_or_else(|| data[*a].total_cmp(&data[*b]))
+    });
     let mut ranks = vec![0.0f64; data.len()];
     let mut i = 0usize;
     while i < order.len() {
