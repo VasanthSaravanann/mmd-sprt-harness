@@ -142,7 +142,7 @@ class SprtLoopResult:
 
 def run_sprt_loop(stream_mutator, k_max: int = K_MAX,
                   k_mut_min: int = K_MUT_MIN, k_mut_max: int = K_MUT_MAX,
-                  successes_per_round: int = 4, trials_per_round: int = 5,
+                  trials_per_round: int = 5,
                   seed: int = 0) -> SprtLoopResult:
     """Run a fixed-point SPRT fuzzing loop.
 

@@ -1,9 +1,10 @@
 //! Unified end-to-end harness pipeline.
 //!
 //! Wires Gate 0 (distributional attestation), the parallel SPRT loop, and the
-//! IPW Phase-4 evaluator into a single pipeline.  In production this library is
-//! fed events from an eBPF ringbuffer; here the ingestion boundary is the
-//! `Ingestion` trait so the kernel-backed path can be dropped in later.
+//! IPW Phase-4 evaluator into a single pipeline.  The Rust pipeline covers 3
+//! of the 4 stages (gate0, sprt, evaluator); the Python pipeline adds a 4th
+//! stage (userspace verifier / schema + SIGKILL budget check) that is not
+//! ported here because it depends on the eBPF runtime.
 
 use harness_core::evaluator::{evaluate_ipw, EvaluatorResult};
 use harness_core::gate0::{gate0, Gate0Result, Stream};
@@ -11,8 +12,6 @@ use harness_core::sprt::{
     assess_convergence, run_sprt_loop, DecayFit, FuzzerFn, SprtLoopResult, Verdict, K_MAX,
     K_MUT_MAX, K_MUT_MIN,
 };
-
-const PIPELINE_STAGES: usize = 3; // gate0, sprt, evaluator
 
 /// What a single pipeline run concluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,13 +27,6 @@ impl DeployVerdict {
             DeployVerdict::DeploymentHalted => "DEPLOYMENT_HALTED",
         }
     }
-}
-
-/// Telemetry ingestion abstraction.  The concrete eBPF ringbuffer consumer can
-/// implement this without changing the rest of the pipeline.
-pub trait Ingestion {
-    /// Drain one batch of telemetry streams (token sequences).
-    fn next_batch(&mut self) -> Vec<Stream>;
 }
 
 /// Per-stage result collector.
@@ -150,4 +142,3 @@ pub fn nonconverging_fuzzer() -> Box<FuzzerFn> {
     Box::new(|round: usize, _worker: usize| PATTERN[round % PATTERN.len()])
 }
 
-pub const STAGE_COUNT: usize = PIPELINE_STAGES;

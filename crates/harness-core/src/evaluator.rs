@@ -235,9 +235,7 @@ pub fn student_t_two_tail(t: f64, dof: f64) -> f64 {
 
 /// Weighted Spearman (rank-based IPW) correlation `(r, p)`.
 pub fn weighted_spearman_corr(x: &[f64], y: &[f64], weights: &[f64]) -> (f64, f64) {
-    let n = x.len();
-    assert!(n == y.len() && n == weights.len() && n >= 3);
-    let _ = n;
+    assert!(x.len() == y.len() && x.len() == weights.len() && x.len() >= 3);
     let rx = average_ranks(x);
     let ry = average_ranks(y);
     weighted_pearson_corr(&rx, &ry, weights)

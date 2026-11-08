@@ -1,4 +1,4 @@
 {
-  "numpy_mmd2_usec_per_call": 91.98332500091055,
-  "numpy_mmd2_calls_per_sec": 10871.53568312627
+  "numpy_mmd2_usec_per_call": 95.29167491564294,
+  "numpy_mmd2_calls_per_sec": 10494.096161970614
 }

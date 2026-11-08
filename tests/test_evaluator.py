@@ -125,6 +125,21 @@ def test_winsorize_single_element_is_unchanged():
     assert winsorize([5.0], 0.99) == [5.0]
 
 
+# Regression: Python winsorize must be NaN-safe exactly like Rust.  NaN is
+# excluded from the percentile rank and preserved in the output.  Previously
+# Python counted NaN in the index, producing a different cap than Rust for
+# the same input.
+def test_winsorize_nan_excluded_from_rank():
+    import math
+    # [1, 2, 3, nan]: non_nan=3, idx=floor(0.99*2)=1, cap=sorted_non_nan[1]=2.0
+    w = [1.0, 2.0, 3.0, float("nan")]
+    capped = winsorize(w, 0.99)
+    assert capped[0] == 1.0
+    assert capped[1] == 2.0
+    assert capped[2] == 2.0, "3.0 must be capped to 2.0 (P99 of non-NaN)"
+    assert math.isnan(capped[3]), "NaN must be preserved"
+
+
 # --------------------------------------------------------------------------
 # Regression: evaluate_ipw must use a rank-based (Spearman) correlation to match
 # the Rust gate, not a Pearson correlation on the raw values.

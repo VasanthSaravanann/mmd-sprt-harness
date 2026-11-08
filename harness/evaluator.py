@@ -38,6 +38,9 @@ def winsorize(weights: Sequence[float], p: float = 0.99) -> List[float]:
     ``(1 - p)`` fraction of weights is genuinely clamped.  Using ``ceil`` would
     land on the maximum element for common ``p`` (e.g. ``p=0.99, n=100`` ->
     index 99) and silently leave outliers untouched.
+
+    NaN-safe: NaN entries are excluded from the percentile rank calculation and
+    preserved in the output, matching the Rust implementation exactly.
     """
     w = list(weights)
     if not w:
@@ -47,10 +50,19 @@ def winsorize(weights: Sequence[float], p: float = 0.99) -> List[float]:
     n = len(w)
     if n == 1:
         return w
-    sorted_w = sorted(w)
-    idx = min(n - 2, int(math.floor(p * (n - 1))))
+    # NaN-safe sort: push NaN to end, non-NaN values sorted normally.
+    # The key (v != v, v) sorts NaN (where v != v is True) after all finite values.
+    sorted_w = sorted(w, key=lambda v: (v != v, v))
+    # Exclude NaN from the rank calculation (matching Rust's non_nan filter).
+    non_nan = sum(1 for v in sorted_w if v == v)
+    if non_nan == 0:
+        return w
+    idx = min(non_nan - 2, int(math.floor(p * (non_nan - 1))))
+    idx = max(idx, 0)
     cap = sorted_w[idx]
-    return [min(x, cap) for x in w]
+    # Preserve NaN entries: min(NaN, cap) in Python returns NaN (first arg
+    # when neither comparison is True), matching Rust's explicit NaN guard.
+    return [min(v, cap) for v in w]
 
 
 def effective_sample_size(weights: Sequence[float]) -> float:
@@ -200,7 +212,12 @@ def student_t_two_tail(t: float, dof: float) -> float:
 
 
 def _survival_t(dof: float, t: float) -> float:
-    """One-sided Student-t survival ``P(T > t)`` (= half the two-sided p)."""
+    """One-sided Student-t survival ``P(T > t)`` (= half the two-sided p).
+
+    .. deprecated::
+        Production code uses :func:`student_t_two_tail` directly.  Kept for
+        backward compatibility with ``tests/test_evaluator.py``.
+    """
     return 0.5 * student_t_two_tail(t, dof)
 
 
