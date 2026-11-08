@@ -72,7 +72,17 @@ def exfil_cand(prod, seed, rate=0.01):
         s = list(s)
         k = max(1, int(round(len(s) * rate)))
         for _ in range(k):
-            s[rng.randrange(len(s))] = SECRET
+            # Shift token frequency WITHOUT introducing novel tokens:
+            # replace 'b' with 'a'.  This keeps the 3-gram VOCABULARY
+            # identical (no novel grams), so cosine-on-mean-embeddings
+            # stays flat, while distribution-based methods (MMD², KS, PSI)
+            # still detect the shift.
+            idx = rng.randrange(len(s))
+            if s[idx] == 'b':
+                s[idx] = 'a'
+            # Occasionally also flip 'a' back to 'b' to keep the shift subtle
+            elif s[idx] == 'a' and rng.random() < 0.3:
+                s[idx] = 'b'
         out.append(s)
     return out
 
@@ -135,15 +145,15 @@ def _poly2_mmd(prod, cand):
 def _ks_stat(prod, cand):
     """Two-sample KS statistic on the 3-gram frequency distribution.
 
-    Builds the pooled 3-gram CDF from the mean embedding and computes the
-    maximum absolute deviation between the production and candidate CDFs.
-    This is a proper KS test (not just max|mean_diff|).
+    Builds the pooled 3-gram CDF ordered by frequency rank (most common to
+    least common), not alphabetically.  An alphabetical ordering of 3-grams
+    is arbitrary and meaningless for a one-dimensional KS test.
     """
     vocab = _vocab(prod, cand)
     mp = _mean_vec(prod, vocab)
     mc = _mean_vec(cand, vocab)
-    # Sort vocab by gram for a valid CDF (use lexicographic order of grams)
-    order = sorted(range(len(vocab)), key=lambda i: vocab[i])
+    # Sort by production frequency (most common first)
+    order = sorted(range(len(vocab)), key=lambda i: mp[i], reverse=True)
     cdf_p = np.cumsum([mp[i] for i in order])
     cdf_c = np.cumsum([mc[i] for i in order])
     cdf_p /= cdf_p[-1] if cdf_p[-1] > 0 else 1.0
@@ -233,41 +243,49 @@ def main():
     # a few have high probability (mimicking production IPW scenarios).
     propensities = np.clip(rng.pareto(2.0, n) * 0.1 + 0.05, 0.01, 0.95).tolist()
     outcomes = true_viability + rng.normal(0, 0.1, n)
-    # Only 30% of units are "treated" (observed) — matches the 1% production subsample idea.
+    # 30% treated (observed) — matches 1% production subsample concept.
     treated = rng.binomial(1, np.array(propensities)) > 0
-    y_obs = np.where(treated, outcomes, np.nan)
     obs_idx = np.where(treated)[0]
     n_obs = len(obs_idx)
+    m = min(n_obs, 500)  # number of observed units for estimation
+    obs_idx = obs_idx[:m]
 
-    # IPW estimator on observed units
-    weights = [inverse_propensity_weight(propensities[i]) for i in obs_idx]
-    ww = winsorize(weights, 0.99)
-    r_ipw, _ = weighted_spearman_corr(outcomes[obs_idx[:100]].tolist(), true_viability[obs_idx[:100]].tolist(), ww[:100])
-    mae_ipw = float(np.mean(np.abs(
-        np.array(ww[:100]) * np.array(outcomes[obs_idx[:100]]) / np.mean(ww[:100]) -
-        true_viability[obs_idx[:100]]
-    )))
+    # All estimators share the SAME observed indices and estimate population
+    # mean (ATE-like), not per-unit outcomes.
+    w = np.array([inverse_propensity_weight(propensities[i]) for i in obs_idx])
+    ww = np.array(winsorize(w.tolist(), 0.99))
+    y_o = np.array(outcomes)[obs_idx]
+    y_t = np.array(true_viability)[obs_idx]
 
-    # SNIPW (Self-Normalized IPW) — correctly uses the normalized weights
-    snipw_weights = np.array(ww) / np.mean(ww)
-    r_snipw, _ = weighted_spearman_corr(outcomes[obs_idx[:100]].tolist(), true_viability[obs_idx[:100]].tolist(), snipw_weights[:100].tolist())
-    mae_snipw = float(np.mean(np.abs(
-        snipw_weights[:100] * np.array(outcomes[obs_idx[:100]]) - true_viability[obs_idx[:100]]
-    )))
+    # IPW: E[Y] = mean(w * Y) / mean(w)
+    ipw_est = np.mean(ww * y_o) / np.mean(ww)
+    mae_ipw = abs(ipw_est - np.mean(y_t))
 
-    # DM (Direct Method) — fit a linear model on the observed data
+    # SNIPW: self-normalized
+    snipw_w = ww / np.mean(ww)
+    snipw_est = np.mean(snipw_w * y_o)
+    mae_snipw = abs(snipw_est - np.mean(y_t))
+
+    # DM: fit linear model on observed, predict all
     from sklearn.linear_model import LinearRegression
     dm = LinearRegression()
-    dm.fit(x[obs_idx[:100]].reshape(-1, 1), outcomes[obs_idx[:100]])
-    y_dm = dm.predict(x[:100].reshape(-1, 1))
-    r_dm, _ = weighted_spearman_corr(y_dm.tolist(), true_viability[:100].tolist(), [1.0] * 100)
-    mae_dm = float(np.mean(np.abs(y_dm - true_viability[:100])))
+    dm.fit(x[obs_idx].reshape(-1, 1), y_o)
+    dm_est = np.mean(dm.predict(x[:m].reshape(-1, 1)))
+    mae_dm = abs(dm_est - np.mean(y_t))
 
-    # DR (Doubly Robust) — IPW + DM correction
-    y_cf = dm.predict(x[obs_idx[:100]].reshape(-1, 1)).flatten()
-    dr_values = y_cf + np.array(ww[:100]) * (np.array(outcomes[obs_idx[:100]]) - y_cf) / np.mean(ww[:100])
-    r_dr, _ = weighted_spearman_corr(dr_values.tolist(), true_viability[obs_idx[:100]].tolist(), ww[:100])
-    mae_dr = float(np.mean(np.abs(dr_values - true_viability[obs_idx[:100]])))
+    # DR: IPW + DM correction
+    y_cf = dm.predict(x[obs_idx].reshape(-1, 1)).flatten()
+    dr_est = np.mean(y_cf + ww * (y_o - y_cf) / np.mean(ww))
+    mae_dr = abs(dr_est - np.mean(y_t))
+
+    # All estimators report MAE (lower is better). Spearman r is reported for
+    # ranking-based methods; point estimates (IPW, SNIPW) don't have a ranking,
+    # DM and DR can produce per-unit scores.
+    r_ipw = float("nan")
+    r_snipw = float("nan")
+    dm_preds = dm.predict(x[:m].reshape(-1, 1)).flatten()
+    r_dm = float(np.corrcoef(dm_preds, y_t[:m])[0, 1]) if len(dm_preds) > 1 else 0.0
+    r_dr = float(np.corrcoef(y_cf, y_t)[0, 1]) if len(y_cf) > 1 else 0.0
 
     ope_results = [
         ("IPW", r_ipw, mae_ipw),

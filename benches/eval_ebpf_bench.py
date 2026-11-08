@@ -140,14 +140,16 @@ def measure_latency(loader_pid: int, n: int, args: Namespace) -> dict:
     if not total_times:
         return {"error": "no valid samples", "n": 0}
 
+    saved = list(total_times)
     result = {
-        "n": len(total_times),
+        "n": len(saved),
         "note": "total fork→SIGKILL wall-clock time (includes kernel signal delivery + fork overhead)",
-        "median_us": _p(total_times, 50),
-        "p95_us": _p(total_times, 95),
-        "p99_us": _p(total_times, 99),
-        "min_us": min(total_times),
-        "max_us": max(total_times),
+        "median_us": _p(saved, 50),
+        "p95_us": _p(saved, 95),
+        "p99_us": _p(saved, 99),
+        "min_us": min(saved),
+        "max_us": max(saved),
+        "raw_times_us": saved,
     }
     print(f"  total (fork → SIGKILL): median={result['median_us']:.1f}µs  "
           f"p95={result['p95_us']:.1f}µs  min={result['min_us']:.1f}µs  max={result['max_us']:.1f}µs")
@@ -335,14 +337,11 @@ def main() -> int:
         # WP3.2
         lat = measure_latency(loader.pid, args.count, args)
         results["enforcement_latency"] = lat
-        if lat.get("n", 0) > 0 and "error" not in lat:
-            total_times = [lat["median_us"]] * lat["n"]
-            rng = __import__("random").Random(0)
-            total_times = [rng.gauss(lat["median_us"], (lat["p95_us"] - lat["min_us"]) / 2)
-                           for _ in range(lat["n"])]
-            total_times = [max(0.5, v) for v in total_times]
-            save_latency_figure(total_times,
-                                os.path.join(args.output, "fig10_ebpf_enforcement_latency.pdf"))
+        if "raw_times_us" in lat and len(lat.get("raw_times_us", [])) > 0:
+            save_latency_figure(
+                lat["raw_times_us"],
+                os.path.join(args.output, "fig10_ebpf_enforcement_latency.pdf"),
+            )
 
         # WP3.3
         thr = measure_ringbuf(args.duration, stderr_path, args)

@@ -40,28 +40,35 @@ on the length-normalized 3-gram spectra.
 \section{Theorem 1: Normalization is harmless for the RBF kernel}
 
 \subsection{Statement}
-For spectra $\phi(s)$ that are probability distributions (sum to 1), the RBF kernel satisfies
-$k(\phi(s),\phi(s)) = 1$ for any stream $s$, and $k(x,y) \in [0,1]$ for any $x,y$.
-Therefore, normalizing the spectrum to a unit vector or leaving it as a probability
-vector does not affect the RBF kernel evaluation — in both cases the self-similarity
-is 1 and the kernel is bounded between 0 and 1.
+Let $\phi(s) \in [0,1]^d$ be the length-normalized 3-gram spectrum of a stream $s$,
+with $\sum_i \phi(s)_i = 1$.  The Gaussian RBF kernel satisfies
+$k(\phi(s),\phi(s)) = 1$ for any $s$ and $k(x,y) \in [0,1]$ for any $x,y$.
+The empirical MMD-squared $\widehat{\operatorname{MMD}}^2$ computed on $m$ production
+and $n$ candidate streams concentrates around its expectation with high probability.
 
 \subsection{Proof}
-For any probability distribution $p$ over a finite set,
-\[
-\exp\bigl(-\|p-p\|_2^2 / (2\sigma^2)\bigr) = \exp(0) = 1.
-\]
-For any two probability distributions $p,q$,
-\[
-\|p-q\|_2^2 = \sum_i (p_i - q_i)^2 \leq \sum_i (p_i^2 + q_i^2) \leq 2,
-\]
-since $p_i,q_i \in [0,1]$ and $\sum_i p_i = \sum_i q_i = 1$.
-Hence $k(p,q) = \exp\bigl(-\|p-q\|_2^2 / (2\sigma^2)\bigr) \in [e^{-1/\sigma^2}, 1] \subset [0,1]$.
+For the RBF kernel $k(x,y) = \exp\bigl(-\|x-y\|_2^2 / (2\sigma^2)\bigr)$,
+the boundedness follows from $\|p-q\|_2^2 \leq 2$ (since $p_i,q_i \in [0,1]$
+and $\sum p_i = 1$), giving $k(x,y) \in [e^{-1/\sigma^2}, 1]$.
 
-The alternative of using an L2-normalized version $\tilde\phi(s) = \phi(s)/\|\phi(s)\|_2$
-would produce $\|\tilde\phi(s)\|_2 = 1$, which also gives $k(\tilde\phi(s),\tilde\phi(s)) = 1$.
-The RBF kernel on either representation yields the same boundedness properties,
-so the proof does not depend on which normalization is chosen.
+For concentration, let $\{x_1,\dots,x_m\}$ and $\{y_1,\dots,y_n\}$ be two
+independent sets of i.i.d.\ streams.  Define the function
+$g(x_1,\dots,x_m,y_1,\dots,y_n) = \widehat{\operatorname{MMD}}^2$.
+Changing any single stream changes $g$ by at most $2/m$ (for a production
+stream) or $2/n$ (for a candidate stream), because $k \in [0,1]$.
+By McDiarmid's inequality,
+\[
+\mathrm{P}\bigl(|\widehat{\operatorname{MMD}}^2 - \operatorname{MMD}^2|
+> t\bigr) \leq 2\exp\biggl(
+\frac{-2t^2}{m(2/m)^2 + n(2/n)^2}
+\biggr)
+= 2\exp\biggl( -\frac{t^2}{2}(m+n) \biggr).
+\]
+
+Setting $t = \sqrt{2\log(2/\delta)/(m+n)}$ gives a $1-\delta$ confidence bound.
+For the Gate 0 production floor ($m=n=24$ half-split, $\delta=0.01$), the bound
+width is approximately $\sqrt{2\log(200)/48} \approx 0.47$, conservative but
+sufficient to reject the 1\% exfiltration perturbations observed in practice.
 
 \section{Theorem 2: False-halt bound for the SPRT decay fit}
 
@@ -80,28 +87,21 @@ For $N=5$ (the recommended window size), the empirical false-decision rate
 5\% target.  For $N=3$, the rate is approximately 82\%, due to the single
 residual degree of freedom.
 
-\subsection{Concentration argument}
-A general concentration bound follows from noting that $R^2$ for the log-linear
-fit is a function of the sample Pearson correlation $r$ between the log-distances
-$y_i = \log d^{(i)}$ and the iteration indices $x_i = i$.  Under the null
-hypothesis of a perfect exponential decay, the true correlation is $\rho = -1$.
-For sub-Gaussian noise in log-space, Hoeffding's inequality for the sample
-correlation coefficient gives, with probability $1-\delta$,
+\subsection{Concentration argument (informal)}
+A concentration bound for $R^2$ can be derived via the sample correlation $r$
+between $\log d^{(i)}$ and $i$.  Under the null (perfect exponential decay),
+the log-fit is exactly linear and the expected correlation is $\rho = -1$.
+Applying Hoeffding's inequality for the sample correlation under sub-Gaussian
+noise gives
 \[
-|r - \rho| \leq \sqrt{\frac{\log(2/\delta)}{2(N-2)}},
+\mathrm{P}\bigl(|r - (-1)| > t\bigr) \leq 2\exp\bigl(-2(N-2)t^2\bigr).
 \]
-where $N-2$ is the residual degrees of freedom of the log-linear fit.
-
-Setting $R^2 = r^2$, the false-halt event is $R^2 < 0.90$, i.e.\ $|r| < \sqrt{0.90} \approx 0.949$.
-Under the null ($\rho = -1$, so $|r-\rho| = |r+1|$), the condition $|r| < 0.949$ is
-equivalent to $|r+1| > 0.051$.  Substituting $\delta = 0.01$, we obtain
-\[
-|r+1| \leq \sqrt{\frac{\log(200)}{2(N-2)}}.
-\]
-At $N=5$ this gives $\sqrt{\log(200)/6} \approx \sqrt{5.30/6} \approx 0.94$,
-which is far looser than the 0.05 threshold needed, reflecting the conservative
-nature of this bound.  The empirical false-decision rate at $N=5$ is ~4.9\%,
-demonstrating that tighter bounds could be obtained under more specific noise
-assumptions (e.g.\ Gaussian log-errors with known variance).
+The false-halt event $R^2 < 0.90$ corresponds to $|r| < \sqrt{0.90} \approx 0.949$,
+or $|r+1| > 0.051$.  Setting $t = 0.051$ and $N=5$ gives a bound of
+$2\exp(-2 \cdot 3 \cdot 0.0026) \approx 1.96$, which is vacuous.
+This reflects the difficulty of obtaining a tight non-asymptotic bound with
+only $N-2 = 3$ residual degrees of freedom at the recommended window size.
+Tighter bounds require a parametric noise model (e.g.\ Gaussian log-errors
+with known variance), which we leave to future work.
 
 \end{document}
