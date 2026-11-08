@@ -54,8 +54,8 @@ sudo ./target/release/ebpf-verifier \
 # Full benchmark (SIGKILL latency + ringbuf throughput under load):
 sudo .venv/bin/python benches/eval_ebpf_bench.py \
   --ebpf-obj target/bpfel-unknown-none/release/ebpf-verifier-ebpf \
-  --output ebpf-bench5 --stress
-# → ebpf-bench5/plain/ and ebpf-bench5/stress/ directories with
+  --output benches/ebpf-bench --stress
+# → benches/ebpf-bench/plain/ and benches/ebpf-bench/stress/ directories with
 #   container_performance.json, fig10_*.pdf, fig11_*.pdf
 ```
 
@@ -72,7 +72,7 @@ sudo .venv/bin/python benches/eval_ebpf_bench.py \
 ├── harness/                      Python reference (gate0, sprt, evaluator, pipeline)
 ├── tests/                        64 Python tests
 ├── benches/                      Bench scripts + orchestrator
-├── ebpf-bench5/                  Real eBPF measurements (from Linux host)
+├── benches/ebpf-bench/           Real eBPF measurements (from Linux host)
 │   ├── plain/                    Unloaded results (fig10, fig11, container_performance.json)
 │   └── stress/                   Under stress-ng CPU load
 └── paper/figures/                Generated figure PDFs (fig1-fig11)
