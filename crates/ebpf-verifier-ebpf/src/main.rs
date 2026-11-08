@@ -14,8 +14,9 @@
 //!   in-kernel (<10µs).  Note: a kprobe cannot veto the syscall; the
 //!   mitigation is the signal, not the return code.
 //! * All three open variants use the same inner-pt_regs indirection:
-//!   outer.rdi → inner pt_regs, then inner.di (=filename) for `open` or
+//!   outer.rdi → inner pt_regs, then inner.rdi (=filename) for `open` or
 //!   inner.rsi (=filename) for `openat`/`openat2`.
+//!   (aya-ebpf bindings use `rdi`/`rsi`, not the kernel header names `di`/`si`.)
 //! * Near-miss events are emitted to userspace over a `BPF_MAP_TYPE_RINGBUF`
 //!   (zero-copy telemetry, replacing disk-bound `near_misses.jsonl`).
 //!
@@ -115,11 +116,12 @@ unsafe fn read_filename_from_rsi(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
     buf
 }
 
-/// Read filename from `inner.di` — used by `open` (musl, Alpine).
+/// Read filename from `inner.rdi` — used by `open` (musl, Alpine).
+/// (aya-ebpf bindings use `rdi`, not the kernel header name `di`.)
 #[inline(always)]
 unsafe fn read_filename_from_di(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
     let inner: pt_regs = inner_pt_regs(ctx);
-    let filename_ptr = inner.di as *const u8;
+    let filename_ptr = inner.rdi as *const u8;
     let mut buf = [0u8; FILENAME_BUF];
     let _ = bpf_probe_read_user_str_bytes(filename_ptr, &mut buf);
     buf
