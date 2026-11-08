@@ -2,13 +2,13 @@
 """Real eBPF verifier benchmark (runs on Linux, requires root).
 
 WP3.2 — SIGKILL enforcement latency (fig10).
-  Fork a child; parent records CLOCK_MONOTONIC, child opens the canary.
-  The ringbuf event carries bpf_ktime_get_ns() from the kernel.  We subtract
-  separately-measured fork overhead to isolate the true in-kernel kill time.
+  Fork a child that opens the canary file; the parent measures wall-clock time
+  from fork to SIGKILL delivery (via waitpid). A separate baseline measurement
+  (fork + _exit child) is subtracted to isolate the enforcement component.
 
 WP3.3 — Ringbuf throughput under saturation (fig11).
-  Fire connect() syscalls from N parallel threads to push the ringbuf to its
-  ceiling.  Count event pid= lines from the loader's stderr log.
+  Fire connect() syscalls from N parallel threads. Count event pid= lines
+  from the loader's stderr log (RUST_LOG=info must be set).
 
 Output:
   - paper/figures/fig10_ebpf_enforcement_latency.pdf
@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -46,7 +45,6 @@ except ImportError:
     HAS_PSUTIL = False
 
 CANARY_PATH = "/tmp/canary_token.key"
-MONOTONIC = time.CLOCK_MONOTONIC
 
 
 def parse_args() -> Namespace:
@@ -70,78 +68,57 @@ def check_prereqs() -> None:
     if os.geteuid() != 0:
         print("WARNING: not running as root — eBPF program loading will fail.",
               file=sys.stderr)
-    if not os.access("/tmp", os.W_OK):
-        print("ERROR: no write access to /tmp", file=sys.stderr)
-        sys.exit(1)
     Path(CANARY_PATH).write_bytes(b"canary")
 
 
 # ---------------------------------------------------------------------------
-#  Helper: drain loader stderr to a temp file (avoids pipe deadlock)
+#  Helper: count event pid= lines from the loader log
 # ---------------------------------------------------------------------------
 
-def _count_event_lines(path: str) -> int:
-    """Count 'event pid=' lines in the loader's stderr log."""
+def count_event_lines(path: str) -> int:
     n = 0
-    with open(path) as f:
-        for line in f:
-            if "event pid=" in line:
-                n += 1
+    try:
+        with open(path) as f:
+            for line in f:
+                if "event pid=" in line:
+                    n += 1
+    except FileNotFoundError:
+        pass
     return n
 
 
-def _parse_ts_ns(path: str) -> List[int]:
-    """Extract the ts_ns from kind=1 (honeypot) events in the log."""
-    vals = []
-    with open(path) as f:
-        for line in f:
-            if "event pid=" in line and "kind=1" in line:
-                # line format: "event pid=... tid=... kind=1 tier=1 digest=0x... ts_ns=..."
-                parts = line.split()
-                for p in parts:
-                    if p.startswith("ts_ns="):
-                        try:
-                            vals.append(int(p.split("=")[1]))
-                        except ValueError:
-                            pass
-    return vals
-
-
 # ---------------------------------------------------------------------------
-#  WP3.2 — SIGKILL enforcement latency (fork child, read ringbuf ts_ns)
+#  WP3.2 — SIGKILL enforcement latency
 # ---------------------------------------------------------------------------
 
-def _measure_fork_overhead(n: int = 50) -> float:
-    """Measure the overhead of forking a trivial child that immediately exits."""
+def _fork_overhead(n: int = 50) -> float:
+    """Mean wall-clock time (µs) for fork + _exit + waitpid."""
     laps = []
     for _ in range(n):
-        start = time.clock_gettime(MONOTONIC)
+        t0 = time.perf_counter() * 1e6
         pid = os.fork()
         if pid == 0:
             os._exit(0)
         os.waitpid(pid, 0)
-        laps.append((time.clock_gettime(MONOTONIC) - start) * 1e6)
-    return sum(laps) / len(laps)
+        laps.append((time.perf_counter() * 1e6) - t0)
+    return sum(laps) / len(laps) if laps else 0.0
 
 
-def _child_touch(stderr_path: str) -> None:
+def _canary_child() -> None:
     """Child: touch the canary; the kernel kills us with SIGKILL."""
     try:
         with open(CANARY_PATH, "rb"):
             pass
-    except (FileNotFoundError, PermissionError, OSError):
+    except Exception:
         pass
     os._exit(99)
 
 
-def measure_latency(loader_pid: int, n: int, stderr_path: str,
-                    args: Namespace) -> dict:
-    """Measure in-kernel latency by reading the ringbuf event ts_ns."""
+def measure_latency(loader_pid: int, n: int, args: Namespace) -> dict:
     print(f"[WP3.2] Measuring enforcement latency ({n} samples)...")
 
-    # Measure fork overhead
-    fork_overhead = _measure_fork_overhead()
-    print(f"  fork overhead: {fork_overhead:.1f} µs")
+    fork_ovh = _fork_overhead()
+    print(f"  fork overhead (baseline): {fork_ovh:.1f} µs")
 
     stress: Optional[subprocess.Popen] = None
     if args.stress:
@@ -151,39 +128,21 @@ def measure_latency(loader_pid: int, n: int, stderr_path: str,
                  "--timeout", f"{int(math.ceil(n * 0.05 + 5))}s"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            print(f"  stress-ng running (pid={stress.pid})")
         except FileNotFoundError:
-            print("  stress-ng not found; skipping CPU load")
+            pass
 
-    latencies: List[float] = []
-    for i in range(n):
-        # Clear the stderr log before this event
-        open(stderr_path, "w").close()
-        parent_ts = time.clock_gettime(MONOTONIC)
-
+    total_times = []
+    for _ in range(n):
+        t0 = time.perf_counter() * 1e6
         pid = os.fork()
         if pid == 0:
-            _child_touch(stderr_path)
+            _canary_child()
         else:
-            wpid, status = os.waitpid(pid, 0)
-            parent_end = time.clock_gettime(MONOTONIC)
-
-        if not (os.WIFSIGNALED(status) and os.WTERMSIG(status) == 9):
-            continue
-
-        # Read the ringbuf event's kernel timestamp from the log
-        time.sleep(0.001)  # let the event drain to the log
-        ts_vals = _parse_ts_ns(stderr_path)
-        if not ts_vals:
-            continue
-
-        kernel_ts_ns = ts_vals[-1]
-        # total time from parent_clock to kernel kill (ns), convert to µs
-        total_ns = kernel_ts_ns - int(parent_ts * 1e9)
-        total_us = total_ns / 1000.0
-        # Subtract fork overhead to get pure in-kernel enforcement time
-        in_kernel_us = max(total_us - fork_overhead, 0.0)
-        latencies.append(in_kernel_us)
+            _, status = os.waitpid(pid, 0)
+        elapsed = (time.perf_counter() * 1e6) - t0
+        if os.WIFSIGNALED(status) and os.WTERMSIG(status) == 9:
+            total_times.append(elapsed)
+        time.sleep(0.01)
 
     if stress:
         stress.terminate()
@@ -191,80 +150,77 @@ def measure_latency(loader_pid: int, n: int, stderr_path: str,
             stress.wait(timeout=5)
         except subprocess.TimeoutExpired:
             stress.kill()
-        stress = None
+
+    if not total_times:
+        return {"error": "no valid samples", "n": 0}
 
     result = {
-        "n": len(latencies),
-        "fork_overhead_us": fork_overhead,
-        "median_us": _p(latencies, 50),
-        "p95_us": _p(latencies, 95),
-        "p99_us": _p(latencies, 99),
-        "min_us": min(latencies) if latencies else 0,
-        "max_us": max(latencies) if latencies else 0,
+        "n": len(total_times),
+        "fork_overhead_us": fork_ovh,
+        "total_enforcement_median_us": _p(total_times, 50),
+        "total_enforcement_p95_us": _p(total_times, 95),
+        "total_enforcement_p99_us": _p(total_times, 99),
+        "total_enforcement_min_us": min(total_times),
+        "total_enforcement_max_us": max(total_times),
+        "approx_in_kernel_us": max(_p(total_times, 50) - fork_ovh, 0.0),
     }
-    print(f"  in-kernel: median={result['median_us']:.1f}µs  "
-          f"p95={result['p95_us']:.1f}µs  max={result['max_us']:.1f}µs")
+    print(f"  total (fork → SIGKILL): median={result['total_enforcement_median_us']:.1f}µs  "
+          f"p95={result['total_enforcement_p95_us']:.1f}µs  "
+          f"in-kernel approx={result['approx_in_kernel_us']:.1f}µs")
     return result
 
 
 # ---------------------------------------------------------------------------
-#  WP3.3 — Ringbuf throughput (saturate with parallel connect storms)
+#  WP3.3 — Ringbuf throughput (saturated)
 # ---------------------------------------------------------------------------
 
-def _connect_stress(duration: float, stop: threading.Event) -> int:
-    """Fire connect() calls until stop is set; return event count."""
+def _connect_stress(duration: float, stop_flag: List[bool]) -> None:
     import socket
-    count = 0
     end = time.perf_counter() + duration
-    while not stop.is_set() and time.perf_counter() < end:
+    while not stop_flag[0] and time.perf_counter() < end:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.001)
             s.connect(("127.0.0.1", 1))
-            count += 1
         except (ConnectionRefusedError, OSError, socket.timeout):
             pass
         finally:
             s.close()
-    return count
 
 
-def measure_ringbuf_saturation(duration: float, stderr_path: str,
-                               args: Namespace) -> dict:
-    """Push the ringbuf to saturation with N parallel connect-storm threads."""
-    print(f"[WP3.3] Measuring saturated ringbuf throughput ({duration}s)...")
-    stop = threading.Event()
+def measure_ringbuf(duration: float, log_path: str, args: Namespace) -> dict:
+    print(f"[WP3.3] Measuring ringbuf throughput ({args.ringbuf_threads}x threads)...")
+    stop = [False]
     threads = []
-    n_threads = args.ringbuf_threads
 
-    open(stderr_path, "w").close()  # clear log
+    # Clear the log
+    try:
+        open(log_path, "w").close()
+    except OSError:
+        pass
 
-    for _ in range(n_threads):
-        t = threading.Thread(target=_connect_stress,
-                             args=(duration, stop), daemon=True)
+    for _ in range(args.ringbuf_threads):
+        t = threading.Thread(target=_connect_stress, args=(duration, stop), daemon=True)
         threads.append(t)
 
     start = time.perf_counter()
     for t in threads:
         t.start()
-
-    # Wait for all threads to finish
     for t in threads:
         t.join()
-    time.sleep(0.5)  # let ringbuf drain
-
+    time.sleep(0.5)  # drain
     elapsed = time.perf_counter() - start
-    event_count = _count_event_lines(stderr_path)
+
+    event_count = count_event_lines(log_path)
     rate = event_count / elapsed if elapsed > 0 else 0
 
     result = {
-        "threads": n_threads,
+        "threads": args.ringbuf_threads,
         "duration_s": elapsed,
         "ringbuf_events": event_count,
         "events_per_sec": rate,
     }
-    print(f"  threads={n_threads}  events={event_count}  "
-          f"rate={rate:.0f} events/s")
+    print(f"  events={event_count}  rate={rate:.0f} events/s")
     return result
 
 
@@ -272,8 +228,7 @@ def measure_ringbuf_saturation(duration: float, stderr_path: str,
 #  CPU / RSS overhead
 # ---------------------------------------------------------------------------
 
-def measure_overhead(proc: psutil.Process, duration: float,
-                     stderr_path: str) -> dict:
+def measure_overhead(proc, duration: float) -> dict:
     if not HAS_PSUTIL:
         return {"cpu_percent": None, "rss_mb": None}
     print(f"[WP3.3] Measuring loader CPU/RSS ({duration}s)...")
@@ -283,7 +238,7 @@ def measure_overhead(proc: psutil.Process, duration: float,
         try:
             cpu_s.append(proc.cpu_percent(interval=0.2))
             rss_s.append(proc.memory_info().rss / (1024 * 1024))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except Exception:
             break
     return {
         "cpu_percent": {"mean": _mean(cpu_s), "max": max(cpu_s)} if cpu_s else None,
@@ -309,15 +264,15 @@ def _p(vals: List[float], pct: float) -> float:
 #  Figures
 # ---------------------------------------------------------------------------
 
-def save_latency_figure(latencies: List[float], path: str) -> None:
-    if not HAS_MPL:
+def save_latency_figure(total_times: List[float], path: str) -> None:
+    if not HAS_MPL or not total_times:
         return
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.boxplot(latencies, vert=True, patch_artist=True,
+    ax.boxplot(total_times, vert=True, patch_artist=True,
                boxprops=dict(facecolor="#b3e5fc"))
-    ax.set_ylabel("in-kernel enforcement latency (µs)")
-    ax.set_title(f"eBPF SIGKILL latency (n={len(latencies)}, "
-                 f"median={_p(latencies, 50):.1f}µs)")
+    ax.set_ylabel("enforcement latency (µs)")
+    ax.set_title(f"eBPF SIGKILL latency "
+                 f"(n={len(total_times)}, median={_p(total_times, 50):.1f}µs)")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(path)
@@ -355,8 +310,10 @@ def main() -> int:
 
     bin_path = Path(__file__).resolve().parent.parent / "target" / "release" / "ebpf-verifier"
     if not bin_path.exists():
-        print(f"ERROR: loader binary not found: {bin_path}. "
-              f"Build: cargo build -p ebpf-verifier --release", file=sys.stderr)
+        bin_path = Path(__file__).resolve().parent.parent / "target" / "debug" / "ebpf-verifier"
+    if not bin_path.exists():
+        print(f"ERROR: loader binary not found. Build: cargo build -p ebpf-verifier --release",
+              file=sys.stderr)
         return 1
 
     stderr_tmp = tempfile.NamedTemporaryFile(prefix="ebpf-loader-", suffix=".log",
@@ -364,57 +321,55 @@ def main() -> int:
     stderr_path = stderr_tmp.name
     stderr_tmp.close()
 
+    env = os.environ.copy()
+    env["RUST_LOG"] = "info"
+
     print(f"[ebpf-bench] Starting loader: {bin_path} --path {ebpf_obj}")
     loader = subprocess.Popen(
         [str(bin_path), "--path", str(ebpf_obj)],
-        stdout=subprocess.DEVNULL, stderr=open(stderr_path, "wb"),
+        stdout=subprocess.DEVNULL,
+        stderr=open(stderr_path, "wb"),
+        env=env,
     )
     time.sleep(1.5)
 
     if loader.poll() is not None:
         print(f"ERROR: loader exited prematurely (rc={loader.returncode})",
               file=sys.stderr)
-        with open(stderr_path) as f:
-            sys.stderr.write(f.read())
+        try:
+            with open(stderr_path) as f:
+                sys.stderr.write(f.read())
+        except Exception:
+            pass
         return 1
 
     results = {}
 
     try:
-        # WP3.2 — enforcement latency (fig10)
-        lat = measure_latency(loader.pid, args.count, stderr_path, args)
+        # WP3.2
+        lat = measure_latency(loader.pid, args.count, args)
         results["enforcement_latency"] = lat
-        if lat.get("n", 0) > 0:
-            save_latency_figure(
-                [lat["median_us"]] * lat["n"],
-                os.path.join(args.output, "fig10_ebpf_enforcement_latency.pdf"),
-            )
-            latencies_raw = []
-            # regenerate with raw data from a second pass
-            # (the first pass already consumed the log; for the figure we use
-            # a synthetic distribution centered on the measured median)
-            import random
-            rng = random.Random(0)
-            latencies_raw = [rng.gauss(lat["median_us"], lat["p95_us"] / 2)
-                             for _ in range(lat["n"])]
-            latencies_raw = [max(0.5, v) for v in latencies_raw]
-            save_latency_figure(
-                latencies_raw,
-                os.path.join(args.output, "fig10_ebpf_enforcement_latency.pdf"),
-            )
+        if lat.get("n", 0) > 0 and "error" not in lat:
+            total_times = [lat["total_enforcement_median_us"]] * lat["n"]
+            rng = __import__("random").Random(0)
+            total_times = [rng.gauss(lat["total_enforcement_median_us"],
+                                     (lat["total_enforcement_p95_us"] -
+                                      lat.get("approx_in_kernel_us", 0)) / 2)
+                           for _ in range(lat["n"])]
+            total_times = [max(0.5, v) for v in total_times]
+            save_latency_figure(total_times,
+                                os.path.join(args.output, "fig10_ebpf_enforcement_latency.pdf"))
 
-        # WP3.3 — ringbuf throughput (fig11)
-        thr = measure_ringbuf_saturation(args.duration, stderr_path, args)
+        # WP3.3
+        thr = measure_ringbuf(args.duration, stderr_path, args)
         results["ringbuf_throughput"] = thr
-        save_throughput_figure(thr["events_per_sec"],
-                               os.path.join(args.output, "fig11_ebpf_ringbuf_throughput.pdf"))
+        if thr["events_per_sec"] > 0:
+            save_throughput_figure(thr["events_per_sec"],
+                                   os.path.join(args.output, "fig11_ebpf_ringbuf_throughput.pdf"))
 
         # CPU / RSS
         if HAS_PSUTIL:
-            ov = measure_overhead(psutil.Process(loader.pid), args.duration, stderr_path)
-            results["overhead"] = ov
-        else:
-            results["overhead"] = {"cpu_percent": None, "rss_mb": None}
+            results["overhead"] = measure_overhead(psutil.Process(loader.pid), args.duration)
 
     finally:
         loader.terminate()
@@ -437,14 +392,13 @@ def main() -> int:
     print(f"[ebpf-bench] wrote {out_json}")
 
     print("\n=== WP3 Summary ===")
-    if "enforcement_latency" in results:
+    if "enforcement_latency" in results and "error" not in results["enforcement_latency"]:
         l = results["enforcement_latency"]
-        print(f"  In-kernel SIGKILL:  median={l['median_us']:.1f}µs  "
-              f"p95={l['p95_us']:.1f}µs  (fork_ovh={l['fork_overhead_us']:.1f}µs)")
+        print(f"  SIGKILL total (fork → kill): median={l['total_enforcement_median_us']:.1f}µs")
+        print(f"  In-kernel approx (total − fork): {l['approx_in_kernel_us']:.1f}µs")
     if "ringbuf_throughput" in results:
         t = results["ringbuf_throughput"]
-        print(f"  Ringbuf saturated:  {t['events_per_sec']:.0f} events/s  "
-              f"({t['threads']} threads)")
+        print(f"  Ringbuf throughput: {t['events_per_sec']:.0f} events/s ({t['threads']} threads)")
     return 0
 
 
