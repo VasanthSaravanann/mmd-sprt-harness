@@ -1,7 +1,7 @@
 #Plan
 ## Environment Setup
 ```bash
-export ADAPTION_API_KEY="***REDACTED-API-KEY***"
+export ADAPTION_API_KEY="${ADAPTION_API_KEY:-load from .env — never commit}"
 mkdir -p harness tests
 pip install pytest numpy scipy scikit-learn
 ```
