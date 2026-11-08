@@ -77,19 +77,3 @@ a zero-copy `BPF_MAP_TYPE_RINGBUF`, kills the canary-accessor in the kernel via
 - **Phase 4** — IPW weights are winsorized at P99 before computing the effective
   sample size `n_eff = (Σw)²/Σw²` and a weighted **Spearman** correlation
   `r_{2,IPW}`. Requires `n_eff ≥ 30` and `r_{2,IPW} > 0.85`.
-
-## Security / credentials
-
-The `ADAPTION_API_KEY` value was once committed in planning docs and is treated
-as **publicly leaked**.
-
-- **History** has been rewritten with `git-filter-repo` and force-pushed to
-  purge the secret from all commits.
-- The current live value is stored only in `.env` (**git-ignored**); a placeholder
-  `.env.example` is tracked so the variable name stays documented.
-- ⚠️ **Action still recommended:** rotate / revoke the leaked credential in the
-  Adption provider dashboard (a manual step that cannot be done from this
-  environment), then invalidate the old value.
-
-Never commit real credentials — use a secret manager or `.env` that is
-git-ignored and referenced as `${ADAPTION_API_KEY}`.
