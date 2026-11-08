@@ -5,35 +5,38 @@ The harness gates deployment by verifying that incoming telemetry stays distribu
 with production (**Gate 0**), that the adaptive fuzzing loop is converging (**SPRT**), and that
 offline evaluation shows sufficient power and a strong IPW correlation (**Phase 4**).
 
-**Primary implementation:** Rust (src in `crates/`), **reference cross-check:** Python (src in `harness/`).
+**Primary implementation:** Rust (`crates/`), **reference cross-check:** Python (`harness/`, `tests/`).
 
 **Verified at HEAD:** Rust 46 tests, Python 64 tests, 0 flake8 issues, 0 Rust warnings.
 
-## Environment
+## How to reproduce everything
 
 ### macOS / dev host (pure-Rust kernels + Python reference)
 
 ```bash
+# Clone and enter the repo
 git clone https://github.com/VasanthSaravanann/mmd-sprt-harness.git
 cd mmd-sprt-harness
 
 # Rust workspace (eBPF crates excluded from default build)
 cargo test                                # 46 tests
 cargo bench -p harness-pipeline           # 6 criterion benchmarks
+cargo run --release -p harness-pipeline --bin bench_report  # → benches/criterion_summary.json
 
 # Python reference suite
 python3 -m venv .venv
 .venv/bin/pip install pytest numpy scipy scikit-learn matplotlib psutil
 .venv/bin/python -m pytest tests/ -q      # 64 tests
 
-# Full benchmark sweep (Tasks 1–6, 8) — generates paper/figures/*.pdf
+# Generate all benchmark figures (Tasks 1-6, 8)
 .venv/bin/python benches/run_all_benches.sh
+# → paper/figures/fig1..fig9 generated
 ```
 
-### Linux build host (eBPF verifier — requires root)
+### Linux build host — eBPF verifier (requires root)
 
 ```bash
-# Nightly toolchain + bpf-linker (one time)
+# One-time: nightly toolchain + compiler
 rustup toolchain install nightly --component rust-src
 cargo install bpf-linker
 
@@ -44,39 +47,69 @@ cargo +nightly build -p ebpf-verifier-ebpf --release \
 # Build the userspace loader
 cargo build -p ebpf-verifier --release
 
-# Benchmarks (root required for eBPF)
-sudo .venv/bin/python benches/eval_ebpf_bench.py \
-  --ebpf-obj target/bpfel-unknown-none/release/ebpf-verifier-ebpf \
-  --output benches/ebpf-bench --stress
-
-# To run the loader standalone (telemetry stream to stderr):
+# Run the loader standalone (telemetry stream to stderr):
 sudo ./target/release/ebpf-verifier \
   --path target/bpfel-unknown-none/release/ebpf-verifier-ebpf
+
+# Full benchmark (SIGKILL latency + ringbuf throughput under load):
+sudo .venv/bin/python benches/eval_ebpf_bench.py \
+  --ebpf-obj target/bpfel-unknown-none/release/ebpf-verifier-ebpf \
+  --output ebpf-bench5 --stress
+# → ebpf-bench5/plain/ and ebpf-bench5/stress/ directories with
+#   container_performance.json, fig10_*.pdf, fig11_*.pdf
 ```
 
 ## Workspace layout
 
 ```
 .
-├── Cargo.toml                          workspace root
+├── Cargo.toml                         workspace root
 ├── crates/
-│   ├── harness-core/            46 tests
-│   │   ├── src/gate0.rs         MMD² + Action Jaccard
-│   │   ├── src/sprt.rs          Parallel fuzzer + N≥5 decay fit
-│   │   └── src/evaluator.rs     P99-winsorized weighted-Spearman IPW gate
+│   ├── harness-core/            46 tests — MMD², SPRT, IPW
 │   ├── harness-pipeline/        e2e pipeline + criterion benches
-│   │   ├── src/lib.rs           run_pipeline() → verdict
-│   │   └── src/bin/bench_report.rs  → benches/criterion_summary.json
-│   ├── ebpf-verifier/           aya userspace loader (Linux only)
+│   ├── ebpf-verifier/           aya userspace loader (Linux root only)
 │   └── ebpf-verifier-ebpf/      no_std kernel program (bpfel target)
-├── harness/                      Python reference (gate0, sprt, evaluator, mock_verifier, pipeline)
+├── harness/                      Python reference (gate0, sprt, evaluator, pipeline)
 ├── tests/                        64 Python tests
-├── benches/                      Benchmark scripts
-│   ├── run_all_benches.sh        macOS: Tasks 1–6, 8
-│   ├── eval_ebpf_bench.py        Linux: real SIGKILL latency, ringbuf throughput, CPU/RSS
-│   └── ebpf-bench/               Real eBPF results (generated on Linux)
-└── paper/figures/                6 simulated PDFs (Tasks 1–6)
+├── benches/                      Bench scripts + orchestrator
+├── ebpf-bench5/                  Real eBPF measurements (from Linux host)
+│   ├── plain/                    Unloaded results (fig10, fig11, container_performance.json)
+│   └── stress/                   Under stress-ng CPU load
+└── paper/figures/                Generated figure PDFs (fig1-fig11)
 ```
+
+## eBPF real benchmark results
+
+Measured on an x86_64 Linux host with `benches/eval_ebpf_bench.py`. The script
+forks a child that opens the canary file `/tmp/canary_token.key`; the kernel
+program fires `bpf_send_signal(SIGKILL)` from `__x64_sys_openat` (and now also
+`__x64_sys_open` and `__x64_sys_openat2` to cover musl/Alpine and `openat2`).
+Latency is the wall-clock time from `fork()` to `waitpid()` receiving SIGKILL.
+
+### Plain (no added load)
+
+| Metric | Value |
+|---|---|
+| SIGKILL latency median | 4.3 ms |
+| SIGKILL latency p95 | 5.4 ms |
+| SIGKILL latency p99 | 6.0 ms |
+| SIGKILL latency max | 7.8 ms |
+| Ringbuf throughput (8 threads) | 69,016 events/s |
+| Loader CPU (mean / peak) | 0.6% / 5.0% |
+| Loader RSS | 37.9 MB |
+
+### Under stress-ng CPU load (all cores busy)
+
+| Metric | Value |
+|---|---|
+| SIGKILL latency median | 2.9 ms (cores at full clock) |
+| SIGKILL latency p95 | 6.3 ms |
+| SIGKILL latency max | 32.2 ms (scheduling tail) |
+| Loader CPU (mean / peak) | 0.9% / 10.0% |
+| Loader RSS | 37.9 MB |
+
+Note: the median drops under load (cores stay at max turbo frequency), but the
+tail widens significantly (scheduler occasionally delays the child's timeslice).
 
 ## Pipeline stages
 
@@ -87,39 +120,24 @@ sudo ./target/release/ebpf-verifier \
 | **Phase 4** – IPW correlation gate | `evaluator.rs` | `PASS` / `INSUFFICIENT_POWER` / `INSUFFICIENT_CORRELATION` / `NOT_SIGNIFICANT` |
 | **Pipeline** – aggregate verdict | `run_pipeline` | `FULL_DEPLOYMENT_GRANTED` / `DEPLOYMENT_HALTED` |
 
-## eBPF real benchmark results
-
-Measured on Linux (x86_64) by `benches/eval_ebpf_bench.py` — the script forks a child
-that opens the canary file `/tmp/canary_token.key`; the kernel program fires
-`bpf_send_signal(SIGKILL)` from the `__x64_sys_openat` kprobe. The parent times
-the child's lifespan via `waitpid`.
-
-| Metric | Value | Target |
-|---|---|---|
-| **SIGKILL latency (total fork+signal)** | **4.5 ms** | — |
-| Ringbuf throughput | **51,580 events/s** | — |
-| Loader CPU | **1.2% mean** (10% peak) | — |
-| Loader RSS | **37.7 MB** | — |
-| **Ringbuf throughput** | **51,580 events/s** | — |
-| **Loader CPU** | **1.2% mean** (10% peak) | — |
-| **Loader RSS** | **37.7 MB** | — |
-
-Full output at `benches/ebpf-bench/` (fig5_ebpf_real_latency.pdf, .png, .json).
-
 ## Benchmark figures
 
-| Figure | Script | Assertion | Reproducible on |
+| Figure | Script | What it shows | Reproducible on |
 |---|---|---|---|
-| `fig1_gate0_sensitivity.pdf` | `benches/eval_gate0_sensitivity.py` | Cosine flat (~0.0007); MMD² crosses 0.015 at 1% injection | Any OS (no deps) |
-| `fig2_sprt_token_savings.pdf` | `benches/eval_sprt_efficiency.py` | ≥ 35% savings, FPR < 5% | Any OS |
-| `fig3_ipw_winsorization.pdf` | `benches/eval_ipw_variance.py` | Raw n_eff < 30; winsorized ≥ 30 to α=1.2 | Any OS |
-| `fig4_sprt_window_ablation.pdf` | `benches/eval_sprt_ablation.py` | N=3 false-decision 82%; N=5 drops to 4.9% | Any OS |
-| `fig5_ebpf_latency.pdf` | `benches/eval_ebpf_race_window.py` | Simulated userspace/eBPF distributions | macOS (sim) |
-| `fig5_ebpf_real_latency.pdf` | `benches/eval_ebpf_bench.py` | Real eBPF SIGKILL latency (fork+signal) | **Linux + root** |
-| `fig6_e2e_pipeline_matrix.pdf` | `benches/eval_e2e_joint_pipeline.py` | 0 false deployments, AUC 1.000 | Any OS |
+| `fig1_gate0_sensitivity.pdf` | `benches/eval_gate0_sensitivity.py` | MMD² vs cosine across 0-5% injection rate | Any OS |
+| `fig2_sprt_token_savings.pdf` | `benches/eval_sprt_efficiency.py` | SPRT token savings CDF (≥35%, FPR<5%) | Any OS |
+| `fig3_ipw_winsorization.pdf` | `benches/eval_ipw_variance.py` | P99 winsorization preserves n_eff≥30 | Any OS |
+| `fig4_sprt_window_ablation.pdf` | `benches/eval_sprt_ablation.py` | Real exponential-fit false-decision rates | Any OS |
+| `fig5_ebpf_latency.pdf` | `benches/eval_ebpf_race_window.py` | Simulated userspace vs eBPF (macOS) | macOS |
+| `fig6_e2e_pipeline_matrix.pdf` | `benches/eval_e2e_joint_pipeline.py` | 0 false deployments, AUC=1.000 | Any OS |
+| `fig7_agent_traces.pdf` | `benches/eval_agent_traces.py` | Suite A/B ROC curve (AUC=0.67) | Any OS |
+| `fig8_baselines_roc.pdf` | `benches/eval_baselines.py` | Detector comparison + OPE estimators | Any OS |
+| `fig9_baselines_ope.pdf` | `benches/eval_baselines.py` | OPE MAE + Spearman r | Any OS |
+| `fig10_ebpf_enforcement_latency.pdf` | `benches/eval_ebpf_bench.py` | Real SIGKILL latency distribution | **Linux + root** |
+| `fig11_ebpf_ringbuf_throughput.pdf` | `benches/eval_ebpf_bench.py` | Ringbuf throughput bar chart | **Linux + root** |
 
-Rust MMD² throughput is **~37×** the scalar Python reference; vectorized NumPy
-baseline is faster at these matrix sizes (see `benches/criterion_summary.json`).
+All figures can be regenerated with `benches/run_all_benches.sh` (macOS figs)
+or `benches/eval_ebpf_bench.py` (Linux eBPF figs).
 
 ## Mathematical notes
 
@@ -141,13 +159,10 @@ Fewer than 5 points → `NEEDS_MORE_DATA` (no panic).
 
 ### Phase 4 — IPW weighted-Spearman correlation
 
-- P99 winsorization via **lower** percentile rank `floor(p·(n−1))` (previous `ceil`
-  silently left outliers uncapped). NaN-safe in both languages.
+- P99 winsorization via **lower** percentile rank `floor(p·(n−1))`. NaN-safe in both languages.
 - Weighted **Spearman** (rank-based) correlation; exact two-sided Student-t p-value
-  via the regularized incomplete beta `I_{ν/(ν+t²)}(ν/2, ½)` — identical in Python
-  and Rust, verified against `scipy.stats.t` (< 1e-12 / < 1e-7).
-- Production subsample is a **seeded uniform random 1% draw** (fixed first-N
-  was corrected to match the "randomized" spec requirement).
+  via the regularized incomplete beta — identical in Python and Rust.
+- Production subsample is a **seeded uniform random 1% draw**.
 
 | Condition | Status token |
 |---|---|
@@ -159,8 +174,7 @@ Fewer than 5 points → `NEEDS_MORE_DATA` (no panic).
 ## Known limitations
 
 - The `ebpf-verifier` and `ebpf-verifier-ebpf` crates target `bpfel-unknown-none` and
-  require a Linux host + nightly toolchain + root; they are excluded from the workspace
-  `default-members` and cannot be compiled or tested on macOS.
+  require a Linux host + nightly toolchain + root; excluded from workspace `default-members`.
 - Benchmark Task 7's ≥15× claim is measured against the **scalar Python reference kernel**
-  this Rust port replaces; the vectorized NumPy baseline is faster at these small matrix
-  sizes and is reported separately in `benches/criterion_summary.json`.
+  this Rust port replaces; vectorized NumPy is faster at these matrix sizes
+  (see `benches/criterion_summary.json`).
