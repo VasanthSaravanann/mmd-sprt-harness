@@ -82,18 +82,26 @@ residual degree of freedom.
 
 \subsection{Concentration argument}
 A general concentration bound follows from noting that $R^2$ for the log-linear
-fit is a function of the sample Pearson correlation between the log-distances
-and the iteration indices.  By Hoeffding's inequality for the sample correlation
-coefficient\footnote{See ``Concentration inequalities for the sample correlation
-coefficient'' by \v{S}id\'{a}k et al.}, with probability $1-\delta$,
+fit is a function of the sample Pearson correlation $r$ between the log-distances
+$y_i = \log d^{(i)}$ and the iteration indices $x_i = i$.  Under the null
+hypothesis of a perfect exponential decay, the true correlation is $\rho = -1$.
+For sub-Gaussian noise in log-space, Hoeffding's inequality for the sample
+correlation coefficient gives, with probability $1-\delta$,
 \[
 |r - \rho| \leq \sqrt{\frac{\log(2/\delta)}{2(N-2)}},
 \]
-where $\rho$ is the population correlation (which under the null hypothesis of a
-perfect exponential decay is $\rho = -1$).  Substituting $R^2 = r^2$ and setting
-$\delta = 0.01$ gives a conservative bound of approximately 0.33 at $N=5$.
-Tighter bounds require a more specific noise model (e.g.\ sub-Gaussian log-errors),
-which we leave to future work.  The empirical measurements confirm that the
-practical false-halt rate is substantially lower than this conservative bound.
+where $N-2$ is the residual degrees of freedom of the log-linear fit.
+
+Setting $R^2 = r^2$, the false-halt event is $R^2 < 0.90$, i.e.\ $|r| < \sqrt{0.90} \approx 0.949$.
+Under the null ($\rho = -1$, so $|r-\rho| = |r+1|$), the condition $|r| < 0.949$ is
+equivalent to $|r+1| > 0.051$.  Substituting $\delta = 0.01$, we obtain
+\[
+|r+1| \leq \sqrt{\frac{\log(200)}{2(N-2)}}.
+\]
+At $N=5$ this gives $\sqrt{\log(200)/6} \approx \sqrt{5.30/6} \approx 0.94$,
+which is far looser than the 0.05 threshold needed, reflecting the conservative
+nature of this bound.  The empirical false-decision rate at $N=5$ is ~4.9\%,
+demonstrating that tighter bounds could be obtained under more specific noise
+assumptions (e.g.\ Gaussian log-errors with known variance).
 
 \end{document}

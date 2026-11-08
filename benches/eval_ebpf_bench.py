@@ -91,19 +91,6 @@ def count_event_lines(path: str) -> int:
 #  WP3.2 — SIGKILL enforcement latency
 # ---------------------------------------------------------------------------
 
-def _fork_overhead(n: int = 50) -> float:
-    """Mean wall-clock time (µs) for fork + _exit + waitpid."""
-    laps = []
-    for _ in range(n):
-        t0 = time.perf_counter() * 1e6
-        pid = os.fork()
-        if pid == 0:
-            os._exit(0)
-        os.waitpid(pid, 0)
-        laps.append((time.perf_counter() * 1e6) - t0)
-    return sum(laps) / len(laps) if laps else 0.0
-
-
 def _canary_child() -> None:
     """Child: touch the canary; the kernel kills us with SIGKILL."""
     try:
@@ -117,8 +104,7 @@ def _canary_child() -> None:
 def measure_latency(loader_pid: int, n: int, args: Namespace) -> dict:
     print(f"[WP3.2] Measuring enforcement latency ({n} samples)...")
 
-    fork_ovh = _fork_overhead()
-    print(f"  fork overhead (baseline): {fork_ovh:.1f} µs")
+    print(f"  measuring total fork→SIGKILL wall-clock time (includes fork overhead)")
 
     stress: Optional[subprocess.Popen] = None
     if args.stress:
@@ -156,17 +142,15 @@ def measure_latency(loader_pid: int, n: int, args: Namespace) -> dict:
 
     result = {
         "n": len(total_times),
-        "fork_overhead_us": fork_ovh,
-        "total_enforcement_median_us": _p(total_times, 50),
-        "total_enforcement_p95_us": _p(total_times, 95),
-        "total_enforcement_p99_us": _p(total_times, 99),
-        "total_enforcement_min_us": min(total_times),
-        "total_enforcement_max_us": max(total_times),
-        "approx_in_kernel_us": max(_p(total_times, 50) - fork_ovh, 0.0),
+        "note": "total fork→SIGKILL wall-clock time (includes kernel signal delivery + fork overhead)",
+        "median_us": _p(total_times, 50),
+        "p95_us": _p(total_times, 95),
+        "p99_us": _p(total_times, 99),
+        "min_us": min(total_times),
+        "max_us": max(total_times),
     }
-    print(f"  total (fork → SIGKILL): median={result['total_enforcement_median_us']:.1f}µs  "
-          f"p95={result['total_enforcement_p95_us']:.1f}µs  "
-          f"in-kernel approx={result['approx_in_kernel_us']:.1f}µs")
+    print(f"  total (fork → SIGKILL): median={result['median_us']:.1f}µs  "
+          f"p95={result['p95_us']:.1f}µs  min={result['min_us']:.1f}µs  max={result['max_us']:.1f}µs")
     return result
 
 
@@ -352,11 +336,9 @@ def main() -> int:
         lat = measure_latency(loader.pid, args.count, args)
         results["enforcement_latency"] = lat
         if lat.get("n", 0) > 0 and "error" not in lat:
-            total_times = [lat["total_enforcement_median_us"]] * lat["n"]
+            total_times = [lat["median_us"]] * lat["n"]
             rng = __import__("random").Random(0)
-            total_times = [rng.gauss(lat["total_enforcement_median_us"],
-                                     (lat["total_enforcement_p95_us"] -
-                                      lat.get("approx_in_kernel_us", 0)) / 2)
+            total_times = [rng.gauss(lat["median_us"], (lat["p95_us"] - lat["min_us"]) / 2)
                            for _ in range(lat["n"])]
             total_times = [max(0.5, v) for v in total_times]
             save_latency_figure(total_times,
@@ -386,9 +368,8 @@ def main() -> int:
             pass
 
     # Write container_performance.json
-    out_json = os.path.join(args.output, "..", "benches", "container_performance.json")
+    out_json = os.path.join(args.output, "container_performance.json")
     out_json = os.path.abspath(out_json)
-    os.makedirs(os.path.dirname(out_json), exist_ok=True)
     with open(out_json, "w") as f:
         json.dump(results, f, indent=2)
     print(f"[ebpf-bench] wrote {out_json}")
@@ -396,8 +377,7 @@ def main() -> int:
     print("\n=== WP3 Summary ===")
     if "enforcement_latency" in results and "error" not in results["enforcement_latency"]:
         l = results["enforcement_latency"]
-        print(f"  SIGKILL total (fork → kill): median={l['total_enforcement_median_us']:.1f}µs")
-        print(f"  In-kernel approx (total − fork): {l['approx_in_kernel_us']:.1f}µs")
+        print(f"  SIGKILL total (fork → SIGKILL): median={l['median_us']:.1f}µs")
     if "ringbuf_throughput" in results:
         t = results["ringbuf_throughput"]
         print(f"  Ringbuf throughput: {t['events_per_sec']:.0f} events/s ({t['threads']} threads)")

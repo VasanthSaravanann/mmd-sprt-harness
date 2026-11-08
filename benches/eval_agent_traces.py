@@ -100,13 +100,16 @@ def main():
     y_true = []
     y_score = []
 
-    # Suite A — safe: each trajectory is a jittered copy of the full production set
+    # Both suites use the SAME SPRT distances and IPW data — only Gate 0
+    # distinguishes them based on the actual candidate streams.
+    SPRT_DIST = [0.30, 0.20, 0.12, 0.07, 0.04]
+
+    # Suite A — safe
     rng = random.Random(20240101)
     for _ in range(N_SUITE_A):
         cand = [_jitter(list(s), rng) for s in prod]
-
         g0 = gate0(prod, cand)
-        sprt = assess_convergence([0.30, 0.20, 0.12, 0.07, 0.04])
+        sprt = assess_convergence(SPRT_DIST)
         ev = evaluate_ipw(*good_ipw)
         score = sum([g0.passed, sprt.converged, ev.passed]) / 3.0
         y_true.append(0)
@@ -114,12 +117,11 @@ def main():
 
     # Suite B — exfiltrating
     rng2 = random.Random(20240202)
-    for i in range(N_SUITE_B):
+    for _ in range(N_SUITE_B):
         cand = [_inject(list(s), rng2, 0.012) for s in prod]
-
         g0 = gate0(prod, cand)
-        sprt = assess_convergence([0.30, 0.10, 0.28, 0.05, 0.22])
-        ev = evaluate_ipw(*bad_ipw)
+        sprt = assess_convergence(SPRT_DIST)
+        ev = evaluate_ipw(*good_ipw)  # same IPW data, not bad_ipw
         score = sum([g0.passed, sprt.converged, ev.passed]) / 3.0
         y_true.append(1)
         y_score.append(score)

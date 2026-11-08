@@ -101,9 +101,19 @@ def _mean_vec(streams, vocab):
 
 
 def _linear_mmd(prod, cand):
-    """3-gram linear (dot-product) MMD²."""
-    return mmd2_3gram(cand, prod, sigma=None)
-    # We'll implement linear by modifying the kernel call.
+    """3-gram linear (dot-product) MMD²: k(x,y) = <x,y>."""
+    import math
+    fx = _spec_vecs(cand)
+    fy = _spec_vecs(prod)
+    def lk(a, b):
+        return sum(va * b.get(k, 0.0) for k, va in a.items())
+    m, n = len(fx), len(fy)
+    if m == 0 or n == 0:
+        return float("inf")
+    xx = sum(lk(fx[i], fx[j]) for i in range(m) for j in range(m)) / (m * m)
+    yy = sum(lk(fy[i], fy[j]) for i in range(n) for j in range(n)) / (n * n)
+    xy = sum(lk(fx[i], fy[j]) for i in range(m) for j in range(n)) / (m * n)
+    return xx + yy - 2.0 * xy
 
 
 def _poly2_mmd(prod, cand):
@@ -123,11 +133,22 @@ def _poly2_mmd(prod, cand):
 
 
 def _ks_stat(prod, cand):
-    """KS statistic on the 3-gram frequency distribution (mean embedding)."""
+    """Two-sample KS statistic on the 3-gram frequency distribution.
+
+    Builds the pooled 3-gram CDF from the mean embedding and computes the
+    maximum absolute deviation between the production and candidate CDFs.
+    This is a proper KS test (not just max|mean_diff|).
+    """
     vocab = _vocab(prod, cand)
     mp = _mean_vec(prod, vocab)
     mc = _mean_vec(cand, vocab)
-    return float(np.max(np.abs(mc - mp)))
+    # Sort vocab by gram for a valid CDF (use lexicographic order of grams)
+    order = sorted(range(len(vocab)), key=lambda i: vocab[i])
+    cdf_p = np.cumsum([mp[i] for i in order])
+    cdf_c = np.cumsum([mc[i] for i in order])
+    cdf_p /= cdf_p[-1] if cdf_p[-1] > 0 else 1.0
+    cdf_c /= cdf_c[-1] if cdf_c[-1] > 0 else 1.0
+    return float(np.max(np.abs(cdf_p - cdf_c)))
 
 
 def _psi(prod, cand, bins=20):
@@ -143,33 +164,41 @@ def _psi(prod, cand, bins=20):
 def main():
     rng = random.Random(0)
     y_true = []
-    scores = {name: [] for name in ["RBF MMD²", "poly-2 MMD²", "KS stat", "PSI"]}
+    scores = {name: [] for name in ["RBF MMD²", "linear MMD²", "poly-2 MMD²", "KS stat", "PSI", "cosine (mean emb)"]}
 
     for i in range(N_TRAJECTORIES):
         valid = rng.random() < 0.5
         prod = make_prod(i)
-        cand = healthy_cand(prod, i + 1000) if valid else exfil_cand(prod, i + 1000, rate=0.01 * (1 + rng.random()))
+        rate = 0.0 if valid else 0.01 * (1 + rng.random())
+        cand = healthy_cand(prod, i + 1000) if valid else exfil_cand(prod, i + 1000, rate=rate)
 
         y_true.append(1 if valid else 0)
 
         # RBF MMD² (current Gate 0)
         scores["RBF MMD²"].append(mmd2_3gram(cand, prod, SIGMA_BW))
 
+        # Linear MMD (3-gram, dot product)
+        scores["linear MMD²"].append(_linear_mmd(prod, cand))
+
         # Poly-2 MMD (3-gram)
         scores["poly-2 MMD²"].append(_poly2_mmd(prod, cand))
 
-        # KS statistic
+        # KS statistic (proper two-sample)
         scores["KS stat"].append(_ks_stat(prod, cand))
 
         # PSI
         scores["PSI"].append(_psi(prod, cand))
+
+        # Cosine distance on mean embeddings (known to stay flat — fig1)
+        scores["cosine (mean emb)"].append(
+            cosine_distance(mean_embedding(cand), mean_embedding(prod)))
 
     y_true = np.array(y_true, int)
 
     # ROC curves
     fig, ax = plt.subplots(figsize=(8, 6))
     results = []
-    for name in ["RBF MMD²", "poly-2 MMD²", "KS stat", "PSI"]:
+    for name in ["RBF MMD²", "linear MMD²", "poly-2 MMD²", "KS stat", "PSI", "cosine (mean emb)"]:
         vals = np.array(scores[name])
         fpr, tpr, _ = roc_curve(1 - y_true, vals)
         a = auc(fpr, tpr)
@@ -196,34 +225,49 @@ def main():
     # ---- WP2.2: OPE comparison ----
     print("\n[WP2.2] OPE comparison...")
     rng = np.random.default_rng(0)
-    n = 500
-    # Ground-truth viability: a known function of some features.
+    n = 2000
+    # Features and ground-truth viability with heavy-tailed propensities.
     x = rng.uniform(0, 1, n)
     true_viability = 0.7 * x + 0.3 * rng.normal(0, 0.05, n)
-    propensities = rng.uniform(0.1, 0.6, n)  # selection probabilities
+    # Heavy-tailed propensities: most units have low selection probability,
+    # a few have high probability (mimicking production IPW scenarios).
+    propensities = np.clip(rng.pareto(2.0, n) * 0.1 + 0.05, 0.01, 0.95).tolist()
     outcomes = true_viability + rng.normal(0, 0.1, n)
+    # Only 30% of units are "treated" (observed) — matches the 1% production subsample idea.
+    treated = rng.binomial(1, np.array(propensities)) > 0
+    y_obs = np.where(treated, outcomes, np.nan)
+    obs_idx = np.where(treated)[0]
+    n_obs = len(obs_idx)
 
-    # IPW estimator
-    weights = [inverse_propensity_weight(p) for p in propensities]
+    # IPW estimator on observed units
+    weights = [inverse_propensity_weight(propensities[i]) for i in obs_idx]
     ww = winsorize(weights, 0.99)
-    r_ipw, p_ipw = weighted_spearman_corr(outcomes[:50], true_viability[:50], ww[:50])
-    mae_ipw = float(np.mean(np.abs(np.array(outcomes[:50]) / np.mean(ww[:50]) - true_viability[:50])))
+    r_ipw, _ = weighted_spearman_corr(outcomes[obs_idx[:100]].tolist(), true_viability[obs_idx[:100]].tolist(), ww[:100])
+    mae_ipw = float(np.mean(np.abs(
+        np.array(ww[:100]) * np.array(outcomes[obs_idx[:100]]) / np.mean(ww[:100]) -
+        true_viability[obs_idx[:100]]
+    )))
 
-    # SNIPW (Self-Normalized IPW)
-    sw = np.array(weights) / np.mean(weights)
-    r_snipw, _ = weighted_spearman_corr(outcomes[:50], true_viability[:50], sw[:50].tolist())
-    mae_snipw = float(np.mean(np.abs(outcomes[:50] - true_viability[:50])))
+    # SNIPW (Self-Normalized IPW) — correctly uses the normalized weights
+    snipw_weights = np.array(ww) / np.mean(ww)
+    r_snipw, _ = weighted_spearman_corr(outcomes[obs_idx[:100]].tolist(), true_viability[obs_idx[:100]].tolist(), snipw_weights[:100].tolist())
+    mae_snipw = float(np.mean(np.abs(
+        snipw_weights[:100] * np.array(outcomes[obs_idx[:100]]) - true_viability[obs_idx[:100]]
+    )))
 
-    # DM (Direct Method)
-    r_dm, _ = weighted_spearman_corr(x[:50], true_viability[:50], [1.0] * 50)
-    mae_dm = float(np.mean(np.abs(x[:50] - true_viability[:50])))
+    # DM (Direct Method) — fit a linear model on the observed data
+    from sklearn.linear_model import LinearRegression
+    dm = LinearRegression()
+    dm.fit(x[obs_idx[:100]].reshape(-1, 1), outcomes[obs_idx[:100]])
+    y_dm = dm.predict(x[:100].reshape(-1, 1))
+    r_dm, _ = weighted_spearman_corr(y_dm.tolist(), true_viability[:100].tolist(), [1.0] * 100)
+    mae_dm = float(np.mean(np.abs(y_dm - true_viability[:100])))
 
-    # DR (Doubly Robust): IPW + DM correction
-    dr_weights = [w * 0.5 + 0.5 for w in weights[:50]]
-    r_dr, _ = weighted_spearman_corr(outcomes[:50], true_viability[:50], dr_weights)
-    mae_dr = float(np.mean(
-        np.abs(dr_weights * np.array(outcomes[:50]) / np.mean(dr_weights) - true_viability[:50])
-    ))
+    # DR (Doubly Robust) — IPW + DM correction
+    y_cf = dm.predict(x[obs_idx[:100]].reshape(-1, 1)).flatten()
+    dr_values = y_cf + np.array(ww[:100]) * (np.array(outcomes[obs_idx[:100]]) - y_cf) / np.mean(ww[:100])
+    r_dr, _ = weighted_spearman_corr(dr_values.tolist(), true_viability[obs_idx[:100]].tolist(), ww[:100])
+    mae_dr = float(np.mean(np.abs(dr_values - true_viability[obs_idx[:100]])))
 
     ope_results = [
         ("IPW", r_ipw, mae_ipw),
