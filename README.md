@@ -96,10 +96,10 @@ the child's lifespan via `waitpid`.
 
 | Metric | Value | Target |
 |---|---|---|
-| **SIGKILL latency median** | **4.5 µs** | < 10 µs ✅ |
-| SIGKILL latency p95 | 4.8 µs | < 10 µs ✅ |
-| SIGKILL latency p99 | 4.9 µs | < 10 µs ✅ |
-| SIGKILL latency max | 6.7 µs | < 10 µs ✅ |
+| **SIGKILL latency (total fork+signal)** | **4.5 ms** | — |
+| Ringbuf throughput | **51,580 events/s** | — |
+| Loader CPU | **1.2% mean** (10% peak) | — |
+| Loader RSS | **37.7 MB** | — |
 | **Ringbuf throughput** | **51,580 events/s** | — |
 | **Loader CPU** | **1.2% mean** (10% peak) | — |
 | **Loader RSS** | **37.7 MB** | — |
@@ -115,7 +115,7 @@ Full output at `benches/ebpf-bench/` (fig5_ebpf_real_latency.pdf, .png, .json).
 | `fig3_ipw_winsorization.pdf` | `benches/eval_ipw_variance.py` | Raw n_eff < 30; winsorized ≥ 30 to α=1.2 | Any OS |
 | `fig4_sprt_window_ablation.pdf` | `benches/eval_sprt_ablation.py` | N=3 false-decision 82%; N=5 drops to 4.9% | Any OS |
 | `fig5_ebpf_latency.pdf` | `benches/eval_ebpf_race_window.py` | Simulated userspace/eBPF distributions | macOS (sim) |
-| `fig5_ebpf_real_latency.pdf` | `benches/eval_ebpf_bench.py` | Real eBPF SIGKILL latency 4.5 µs | **Linux + root** |
+| `fig5_ebpf_real_latency.pdf` | `benches/eval_ebpf_bench.py` | Real eBPF SIGKILL latency (fork+signal) | **Linux + root** |
 | `fig6_e2e_pipeline_matrix.pdf` | `benches/eval_e2e_joint_pipeline.py` | 0 false deployments, AUC 1.000 | Any OS |
 
 Rust MMD² throughput is **~37×** the scalar Python reference; vectorized NumPy

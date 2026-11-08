@@ -255,6 +255,8 @@ def _mean(vals: List[float]) -> float:
 
 
 def _p(vals: List[float], pct: float) -> float:
+    if not vals:
+        return float("nan")
     s = sorted(vals)
     i = min(len(s) - 1, int(len(s) * pct / 100))
     return s[i]

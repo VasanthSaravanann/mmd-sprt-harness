@@ -97,19 +97,12 @@ def main():
     good_ipw = _ipw_good()
     bad_ipw = _ipw_bad(good_ipw)
 
-    os.makedirs(TRACES, exist_ok=True)
-
     y_true = []
     y_score = []
 
-    # Suite A — safe
+    # Suite A — safe: each trajectory is a jittered copy of the full production set
     rng = random.Random(20240101)
-    for i in range(N_SUITE_A):
-        idx = i % len(prod)
-        cand = [_jitter(prod[idx], rng)]
-        if i >= N_SUITE_B:
-            cand = [_jitter(s, rng) for s in prod[idx:idx+1] for _ in range(1)]
-        # Actually build a proper candidate set: 1 jittered copy of each prod stream
+    for _ in range(N_SUITE_A):
         cand = [_jitter(list(s), rng) for s in prod]
 
         g0 = gate0(prod, cand)
