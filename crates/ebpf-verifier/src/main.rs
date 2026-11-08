@@ -63,9 +63,13 @@ async fn main() -> anyhow::Result<()> {
     // function names for syscall handlers are `__x64_sys_connect`,
     // `__x64_sys_openat` (x86_64) or `__arm64_sys_*` (aarch64).  The program
     // names (`#[kprobe]` in the ebpf crate) are arbitrary eBPF function labels.
+    // The `open` syscall (musl/Alpine) and `openat2` bypass __x64_sys_openat.
+    // All three variants must be hooked for full canary-path coverage.
     for (prog_name, hook) in [
         ("sys_enter_connect", "__x64_sys_connect"),
         ("sys_enter_openat", "__x64_sys_openat"),
+        ("sys_enter_open", "__x64_sys_open"),
+        ("sys_enter_openat2", "__x64_sys_openat2"),
     ] {
         let prog: &mut KProbe = ebpf
             .program_mut(prog_name)

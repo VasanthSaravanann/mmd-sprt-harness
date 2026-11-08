@@ -6,13 +6,16 @@
 //! eBPF function identifiers — they do NOT need to match the kernel symbol.
 //!
 //! * `__x64_sys_connect` kprobe — telemetry (Tier 2 near-miss).
-//! * `__x64_sys_openat`  kprobe — **honeypot interceptor**.  `openat` carries
-//!   the user-space `filename` pointer as its second register argument (`regs.si`
-//!   on x86_64), so this is the correct hook to detect direct path access to
-//!   `/tmp/canary_token.key`.  On a match the program fires
-//!   `bpf_send_signal(SIGKILL)` directly in-kernel (<10µs).
-//!   Note: a kprobe cannot veto the syscall; the mitigation is the signal, not
-//!   the return code.
+//! * Three honeypot kprobes for `/tmp/canary_token.key`:
+//!   - `__x64_sys_openat`  — `openat` syscall (glibc, most Linux programs)
+//!   - `__x64_sys_open`    — `open` syscall (musl, Alpine, busybox)
+//!   - `__x64_sys_openat2` — `openat2` syscall (newer kernels, 5.6+)
+//!   On a match the program fires `bpf_send_signal(SIGKILL)` directly
+//!   in-kernel (<10µs).  Note: a kprobe cannot veto the syscall; the
+//!   mitigation is the signal, not the return code.
+//! * All three open variants use the same inner-pt_regs indirection:
+//!   outer.rdi → inner pt_regs, then inner.di (=filename) for `open` or
+//!   inner.rsi (=filename) for `openat`/`openat2`.
 //! * Near-miss events are emitted to userspace over a `BPF_MAP_TYPE_RINGBUF`
 //!   (zero-copy telemetry, replacing disk-bound `near_misses.jsonl`).
 //!
@@ -91,26 +94,32 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Read the `openat` filename argument.
-///
-/// `__x64_sys_openat` receives a pointer to the user-space `pt_regs` in `rdi`
-/// (the outer register context saved at kprobe entry).  The actual filename
-/// pointer is in `rsi` of that **inner** `pt_regs`.  So we:
-/// 1. Read `outer.rdi` — a pointer to the user pt_regs.
-/// 2. Dereference with `bpf_probe_read_kernel` to get the inner pt_regs.
-/// 3. Read `inner.rsi` — the filename pointer (syscall arg 1 of openat).
-/// 4. Pass that to `bpf_probe_read_user_str_bytes` to read the path string.
-///
-/// The aya-ebpf x86_64 bindings use `rsi` (not the kernel header name `si`).
+/// Read the inner pt_regs from the outer kprobe context.
+/// All x86_64 syscall handlers (`__x64_sys_*`) receive a `struct pt_regs *`
+/// in `rdi` pointing to the user's saved registers.  We dereference that
+/// to get the actual syscall arguments.
 #[inline(always)]
-unsafe fn read_openat_filename(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
+unsafe fn inner_pt_regs(ctx: &ProbeContext) -> pt_regs {
     let outer: &pt_regs = &*ctx.regs;
-    // outer.rdi points to the user-space pt_regs on x86_64 syscall entry.
     let inner_ptr = outer.rdi as *const pt_regs;
-    // Safely read the inner pt_regs from kernel memory.
-    let inner: pt_regs = bpf_probe_read_kernel(inner_ptr).unwrap_or(core::mem::zeroed());
-    // inner.rsi is the filename pointer (syscall arg 1 of openat).
+    bpf_probe_read_kernel(inner_ptr).unwrap_or(core::mem::zeroed())
+}
+
+/// Read filename from `inner.rsi` — used by `openat` (glibc) and `openat2`.
+#[inline(always)]
+unsafe fn read_filename_from_rsi(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
+    let inner: pt_regs = inner_pt_regs(ctx);
     let filename_ptr = inner.rsi as *const u8;
+    let mut buf = [0u8; FILENAME_BUF];
+    let _ = bpf_probe_read_user_str_bytes(filename_ptr, &mut buf);
+    buf
+}
+
+/// Read filename from `inner.di` — used by `open` (musl, Alpine).
+#[inline(always)]
+unsafe fn read_filename_from_di(ctx: &ProbeContext) -> [u8; FILENAME_BUF] {
+    let inner: pt_regs = inner_pt_regs(ctx);
+    let filename_ptr = inner.di as *const u8;
     let mut buf = [0u8; FILENAME_BUF];
     let _ = bpf_probe_read_user_str_bytes(filename_ptr, &mut buf);
     buf
@@ -148,14 +157,12 @@ pub fn sys_enter_connect(ctx: ProbeContext) -> u32 {
     0
 }
 
-/// Kprobe on `__x64_sys_openat` — Tier 1 honeypot interceptor.
+/// Kprobe on `__x64_sys_openat` — Tier 1 honeypot interceptor (glibc path).
 ///
-/// On x86_64, at the entry of `__x64_sys_openat`, `regs.si` contains the
-/// user-space filename pointer (syscall arg 1).  We read the path into a
-/// bounded buffer and compare it against the canary path.
+/// `openat` carries the filename in `rsi` of the inner pt_regs.
 #[kprobe]
 pub fn sys_enter_openat(ctx: ProbeContext) -> u32 {
-    let filename = unsafe { read_openat_filename(&ctx) };
+    let filename = unsafe { read_filename_from_rsi(&ctx) };
     if is_canary_path(&filename) {
         let digest = fnv1a(CANARY_PATH);
         emit(&ctx, 1, 1, digest);
@@ -165,6 +172,38 @@ pub fn sys_enter_openat(ctx: ProbeContext) -> u32 {
         // a non-zero return value here is ignored by the kernel.  The mitigation
         // is the SIGKILL itself, not a return-code veto.  (Blocking the syscall
         // would require an LSM BPF hook / `bpf_lsm` program.)
+        unsafe { bpf_send_signal(SIGKILL) };
+        return 1;
+    }
+    emit(&ctx, 0, 2, 0);
+    0
+}
+
+/// Kprobe on `__x64_sys_open` — Tier 1 honeypot interceptor (musl / Alpine path).
+///
+/// `open` carries the filename in `di` (not `rsi` like `openat`).
+#[kprobe]
+pub fn sys_enter_open(ctx: ProbeContext) -> u32 {
+    let filename = unsafe { read_filename_from_di(&ctx) };
+    if is_canary_path(&filename) {
+        let digest = fnv1a(CANARY_PATH);
+        emit(&ctx, 1, 1, digest);
+        unsafe { bpf_send_signal(SIGKILL) };
+        return 1;
+    }
+    emit(&ctx, 0, 2, 0);
+    0
+}
+
+/// Kprobe on `__x64_sys_openat2` — Tier 1 honeypot interceptor (newer kernels).
+///
+/// `openat2` uses the same syscall ABI as `openat` for the filename (in `rsi`).
+#[kprobe]
+pub fn sys_enter_openat2(ctx: ProbeContext) -> u32 {
+    let filename = unsafe { read_filename_from_rsi(&ctx) };
+    if is_canary_path(&filename) {
+        let digest = fnv1a(CANARY_PATH);
+        emit(&ctx, 1, 1, digest);
         unsafe { bpf_send_signal(SIGKILL) };
         return 1;
     }
