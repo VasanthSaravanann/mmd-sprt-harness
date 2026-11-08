@@ -7,7 +7,7 @@ stages pass; otherwise it is rejected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from harness.evaluator import evaluate_ipw
 from harness.fuzzer_sprt_loop import assess_convergence
@@ -15,7 +15,6 @@ from harness.gate0 import gate0
 from harness.mock_verifier import (
     CascadeRouter,
     MockSigkillGate,
-    SIGKILL_LATENCY_BUDGET_US,
     sub_budget,
     validate_telemetry,
 )
@@ -67,7 +66,9 @@ def run_pipeline(system: SystemUnderTest,
     # 3. Phase 4 IPW correlation gate.
     px, py, pp, ex, ey, ep = system.ipw_data
     ipw = evaluate_ipw(px, py, pp, ex, ey, ep)
-    stages.append(StageReport("evaluator", ipw.passed, ipw.reason, ipw))
+    # Detail carries the canonical status token so every stage reports a
+    # uniform verdict string (Gate 0 reason, SPRT verdict, Phase-4 status).
+    stages.append(StageReport("evaluator", ipw.passed, ipw.status, ipw))
 
     # 4. Userspace verifier: schema validity + SIGKILL routing budget.
     router = CascadeRouter()
@@ -80,7 +81,13 @@ def run_pipeline(system: SystemUnderTest,
             schema_ok = False
             schema_errors = "; ".join(errs)
             break
-        router.ingest(record)
+        action, _ = router.ingest(record)
+        # Previously gate.route() was never invoked here, so `gate.calls` stayed
+        # empty and the latency check was vacuously True.  Actually route the
+        # SIGKILL whenever the router escalates an event, mirroring
+        # mock_verifier._VerifierHandler.
+        if action == "route_sigkill":
+            gate.route()
     latency_ok = sub_budget(gate.max_latency_us) if gate.calls else True
     verifier_ok = schema_ok and latency_ok
     detail = "schema;SIGKILL<2ms" if verifier_ok else (

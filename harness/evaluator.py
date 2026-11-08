@@ -106,7 +106,6 @@ def weighted_correlation(x: Sequence[float], y: Sequence[float],
     wsum = sum(w)
     if wsum <= 0:
         raise ValueError("non-positive weight sum")
-    wbar = wsum / n
 
     mx = sum(wi * xi for wi, xi in zip(w, x)) / wsum
     my = sum(wi * yi for wi, yi in zip(w, y)) / wsum
@@ -132,7 +131,7 @@ def weighted_correlation(x: Sequence[float], y: Sequence[float],
 
 def _survival_t(dof: float, t: float) -> float:
     """Two-sided Student-t survival by numerical integration (normal approx)."""
-    from math import exp, lgamma
+    from math import lgamma
     if dof > 120:
         # normal approximation
         return 0.5 * math.erfc(t / math.sqrt(2.0))
@@ -173,8 +172,17 @@ def assemble_combined(
     eval_x: Sequence[float],
     eval_y: Sequence[float],
     eval_select_prob: Sequence[float],
+    seed: int = 0,
 ) -> tuple:
-    """Combine 1% production + high-:math:`V_E` eval samples; winsorize IPW."""
+    """Combine 1% production + high-:math:`V_E` eval samples; winsorize IPW.
+
+    The production subset is a *uniform random sample* of 1% of the rows
+    (seeded for reproducibility).  The previous implementation took the first
+    ``keep`` rows, which is a deterministic, order-biased subset and contradicts
+    the spec's "1% randomized production data".
+    """
+    import random
+
     weights: List[float] = []
     x: List[float] = []
     y: List[float] = []
@@ -182,9 +190,10 @@ def assemble_combined(
     # Keep a 1% randomized subset of production.
     prod_n = len(prod_x)
     keep = max(1, int(round(prod_n * PROD_FRACTION)))
-    if keep > prod_n:
-        keep = prod_n
-    for i in range(keep):
+    keep = min(keep, prod_n)
+    rng = random.Random(seed)
+    idxs = rng.sample(range(prod_n), keep)
+    for i in idxs:
         x.append(prod_x[i])
         y.append(prod_y[i])
         weights.append(inverse_propensity_weight(prod_select_prob[i]))
@@ -206,11 +215,17 @@ def evaluate_ipw(
     eval_x: Sequence[float],
     eval_y: Sequence[float],
     eval_select_prob: Sequence[float],
+    seed: int = 0,
 ) -> EvaluatorData:
-    """Run the Phase 4 IPW correlation gate."""
+    """Run the Phase 4 IPW correlation gate.
+
+    ``seed`` controls the random 1% production subsample (see
+    :func:`assemble_combined`).
+    """
     x, y, weights = assemble_combined(
         prod_x, prod_y, prod_select_prob,
         eval_x, eval_y, eval_select_prob,
+        seed=seed,
     )
     n_eff = effective_sample_size(weights)
     # Use the weighted Spearman (rank) correlation to match the spec and the

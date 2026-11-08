@@ -1,6 +1,5 @@
 """Task 1: userspace verifier abstraction proof."""
 
-import json
 import os
 
 import pytest

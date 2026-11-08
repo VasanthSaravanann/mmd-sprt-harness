@@ -47,15 +47,15 @@ def make_rollout(rng, failing: bool):
     if not failing:
         d0 = rng.uniform(0.30, 0.50)
         lam = rng.uniform(0.55, 0.80)
-        silm = 0.08  # small residual noise so the fit is identifiable early
+        sigma_n = 0.08  # small residual noise so the fit is identifiable early
     else:
         d0 = rng.uniform(0.40, 0.50)
         lam = rng.uniform(0.03, 0.10)  # barely any decay
-        silm = sigma2 ** 0.5            # heavy noise, no structure
+        sigma_n = sigma2 ** 0.5            # heavy noise, no structure
     out = []
     for i in range(HORIZON):
         clean = d0 * 2.718281828459045 ** (-lam * i)
-        out.append(clean * max(1.0 + rng.gauss(0.0, silm), 0.2))
+        out.append(clean * max(1.0 + rng.gauss(0.0, sigma_n), 0.2))
     return out
 
 

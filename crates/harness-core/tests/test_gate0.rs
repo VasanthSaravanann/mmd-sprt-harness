@@ -135,3 +135,22 @@ fn empty_stream_is_well_formed() {
     assert_eq!(sp.len(), 1);
     assert!(sp.contains_key(&[0u8, 0u8, 0u8]));
 }
+
+// Regression: a degenerate production set must NOT yield eps_prod = inf, which
+// previously let any candidate pass the MMD^2 check.
+#[test]
+fn degenerate_single_prod_does_not_bypass_gate() {
+    let prod = vec![b"abcabcabcabc".to_vec()];
+    // candidate with identical action set but a shifted 3-gram distribution
+    let cand = vec![b"abcabcabcabcab".to_vec()];
+    let res = gate0(&prod, &cand);
+    assert_eq!(res.eps_prod, MMD2_FLOOR, "degenerate prod must use the absolute floor");
+    assert!(res.mmd2 > res.eps_prod, "shifted distribution must fail the MMD^2 check");
+    assert!(!res.passed);
+}
+
+#[test]
+fn mmd2_both_empty_is_zero_not_inf() {
+    let empty: Vec<Stream> = vec![];
+    assert_eq!(mmd2(&empty, &empty, SIGMA_BW), 0.0);
+}

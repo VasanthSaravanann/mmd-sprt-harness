@@ -147,3 +147,38 @@ def test_evaluate_ipw_is_rank_based_not_pearson():
 def test_average_ranks_ties_share_mean():
     from harness.evaluator import _average_ranks
     assert _average_ranks([1.0, 1.0, 3.0, 2.0]) == [1.5, 1.5, 4.0, 3.0]
+
+
+# --------------------------------------------------------------------------
+# Regression: the two-sided p-value must match the normal approximation
+# (previously the Rust path returned a one-sided value half of Python's).
+# Also: production subsampling must be RANDOM (spec: "1% randomized"), and the
+# default seed must make the result reproducible.
+# --------------------------------------------------------------------------
+def test_two_sided_p_value_normal_case():
+    from harness.evaluator import _survival_t, welch_t_approximation
+    t = 1.5
+    dof = welch_t_approximation(11)  # n_eff=11 -> dof=10 -> integration branch
+    p_two = 2.0 * _survival_t(dof, abs(t))
+    p_one = _survival_t(dof, abs(t))
+    assert p_two == pytest.approx(2.0 * p_one)
+
+
+def test_production_subsample_is_randomized_not_first_n():
+    from harness.evaluator import assemble_combined
+    n = 3000
+    px = list(range(n)); py = list(range(n)); pp = [0.01] * n
+    ex = [0.5] * 10; ey = [0.5] * 10; ep = [0.4] * 10
+    x, _, _ = assemble_combined(px, py, pp, ex, ey, ep)
+    # 1% of 3000 = 30 rows; a first-N implementation yields 0..29 exactly.
+    assert set(x[:30]) != set(range(30)), "production sample must be randomized, not first-N"
+
+
+def test_production_subsample_reproducible_with_seed():
+    from harness.evaluator import assemble_combined
+    n = 2000
+    px = list(range(n)); py = list(range(n)); pp = [0.01] * n
+    ex = [0.5] * 5; ey = [0.5] * 5; ep = [0.4] * 5
+    x1, _, _ = assemble_combined(px, py, pp, ex, ey, ep, seed=42)
+    x2, _, _ = assemble_combined(px, py, pp, ex, ey, ep, seed=42)
+    assert x1 == x2

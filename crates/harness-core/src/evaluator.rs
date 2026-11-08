@@ -124,9 +124,15 @@ fn average_ranks(data: &[f64]) -> Vec<f64> {
     ranks
 }
 
-/// Standard-normal survival (two-sided p for the correlation t-test).
+/// Two-sided standard-normal p-value for a correlation t-statistic.
+///
+/// `erfc(z/sqrt(2))` is the two-sided normal tail `2*P(N(0,1) > |z|)`.  The
+/// previous implementation returned `0.5 * erfc(...)` — a ONE-sided p-value
+/// exactly half of Python's two-sided result, which could flip the `p < 0.01`
+/// gate across languages for the same data.
 fn norm_two_tail(z: f64) -> f64 {
-    0.5 * (1.0 - erf(z / 2f64.sqrt()))
+    // erfc(z) = 1 - erf(z); use the stable complement form.
+    1.0 - erf(z / 2f64.sqrt())
 }
 
 fn erf(x: f64) -> f64 {
@@ -182,7 +188,13 @@ pub fn weighted_pearson_corr(x: &[f64], y: &[f64], weights: &[f64]) -> (f64, f64
     (r, p)
 }
 
-/// Combine 1%-production + stratified eval samples, then winsorize IPW weights.
+/// Combine a 1% **uniformly random** production subsample with the stratified
+/// high-perf evaluation sample, then winsorize the IPW weights at P99.
+///
+/// The previous implementation took the first `keep` production rows — a
+/// deterministic, order-biased subset contradicting the spec's "1% randomized
+/// production data".  We now draw `keep` distinct indices via a seeded
+/// Fisher-Yates shuffle (deterministic per `seed`).
 pub fn assemble_combined(
     prod_x: &[f64],
     prod_y: &[f64],
@@ -190,6 +202,7 @@ pub fn assemble_combined(
     eval_x: &[f64],
     eval_y: &[f64],
     eval_sel: &[f64],
+    seed: u64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut x = Vec::new();
     let mut y = Vec::new();
@@ -197,7 +210,19 @@ pub fn assemble_combined(
 
     let keep = ((prod_x.len() as f64) * PROD_FRACTION).round() as usize;
     let keep = keep.clamp(1, prod_x.len());
+    // Deterministic seeded partial Fisher-Yates: sample `keep` distinct indices.
+    let mut indices: Vec<usize> = (0..prod_x.len()).collect();
+    let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0x2545_F491_4F6C_DD1D);
     for i in 0..keep {
+        // xorshift64*
+        rng ^= rng >> 12;
+        rng ^= rng << 25;
+        rng ^= rng >> 27;
+        let r = rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
+        let j = i + (r as usize) % (indices.len() - i);
+        indices.swap(i, j);
+    }
+    for &i in &indices[..keep] {
         x.push(prod_x[i]);
         y.push(prod_y[i]);
         w.push(inverse_propensity_weight(prod_sel[i]));
@@ -211,34 +236,9 @@ pub fn assemble_combined(
     (x, y, w)
 }
 
-/// Run the Phase-4 IPW correlation gate.
-///
-/// Returns `(x, y, weights)` plus a summarized result in a tuple
-/// `(passed, n_eff, r, p, reason)`.
-pub fn evaluate_ipw_vec(
-    prod_x: &[f64],
-    prod_y: &[f64],
-    prod_sel: &[f64],
-    eval_x: &[f64],
-    eval_y: &[f64],
-    eval_sel: &[f64],
-) -> Vec<f64> {
-    let (x, y, w) = assemble_combined(prod_x, prod_y, prod_sel, eval_x, eval_y, eval_sel);
-    let n_eff = effective_sample_size(&w);
-    let (r, p) = weighted_spearman_corr(&x, &y, &w);
-    let (passed, _outcome) = if n_eff < N_EFF_MIN as f64 {
-        (false, EvalOutcome::InsufficientPower)
-    } else if r <= R_MIN {
-        (false, EvalOutcome::InsufficientCorrelation)
-    } else if p >= P_MAX {
-        (false, EvalOutcome::NotSignificant)
-    } else {
-        (true, EvalOutcome::Pass)
-    };
-    vec![if passed { 1.0 } else { 0.0 }, n_eff, r, p]
-}
-
 /// Structured result form of the IPW gate.
+///
+/// Uses `seed = 0` for the production subsample; see [`evaluate_ipw_seeded`].
 pub fn evaluate_ipw(
     prod_x: &[f64],
     prod_y: &[f64],
@@ -247,7 +247,20 @@ pub fn evaluate_ipw(
     eval_y: &[f64],
     eval_sel: &[f64],
 ) -> EvaluatorResult {
-    let (x, y, w) = assemble_combined(prod_x, prod_y, prod_sel, eval_x, eval_y, eval_sel);
+    evaluate_ipw_seeded(prod_x, prod_y, prod_sel, eval_x, eval_y, eval_sel, 0)
+}
+
+/// Structured result form of the IPW gate with a caller-chosen sampling seed.
+pub fn evaluate_ipw_seeded(
+    prod_x: &[f64],
+    prod_y: &[f64],
+    prod_sel: &[f64],
+    eval_x: &[f64],
+    eval_y: &[f64],
+    eval_sel: &[f64],
+    seed: u64,
+) -> EvaluatorResult {
+    let (x, y, w) = assemble_combined(prod_x, prod_y, prod_sel, eval_x, eval_y, eval_sel, seed);
     let n_eff = effective_sample_size(&w);
     let (r, p) = weighted_spearman_corr(&x, &y, &w);
     let (passed, outcome) = if n_eff < N_EFF_MIN as f64 {

@@ -81,6 +81,8 @@ def mmd2_3gram(x_streams: Sequence[Sequence[str]],
     fx = [normalized_ngram_vector(s) for s in x_streams]
     fy = [normalized_ngram_vector(s) for s in y_streams]
     m, n = len(fx), len(fy)
+    if m == 0 and n == 0:
+        return 0.0
     if m == 0 or n == 0:
         return math.inf
 
@@ -150,13 +152,24 @@ class Gate0Result:
 def gate0(prod_streams: Sequence[Sequence[str]],
           cand_streams: Sequence[Sequence[str]],
           seed: int = 0) -> Gate0Result:
-    """Run the Gate 0 attestation on candidate vs production streams."""
-    # Production dispersion: split into two halves and measure within-prod MMD.
-    half = max(1, len(prod_streams) // 2)
-    prod_a = prod_streams[:half]
-    prod_b = prod_streams[half:]
-    mmd_prod_prod = mmd2_3gram(prod_a, prod_b)
-    eps_prod = max(mmd_prod_prod, MMD2_FLOOR)
+    """Run the Gate 0 attestation on candidate vs production streams.
+
+    Degenerate production sets are guarded: with 0 or 1 production streams the
+    within-production dispersion cannot be estimated (the second split half is
+    empty and MMD^2 is +inf), which previously set ``eps_prod = inf`` and let
+    ANY candidate pass the distributional check.  In that case we use the
+    absolute floor ``MMD2_FLOOR`` as ``eps_prod``.
+    """
+    if len(prod_streams) < 2:
+        mmd_prod_prod = 0.0
+        eps_prod = MMD2_FLOOR
+    else:
+        # Production dispersion: split into two halves and measure within-prod MMD.
+        half = max(1, len(prod_streams) // 2)
+        prod_a = prod_streams[:half]
+        prod_b = prod_streams[half:]
+        mmd_prod_prod = mmd2_3gram(prod_a, prod_b)
+        eps_prod = max(mmd_prod_prod, MMD2_FLOOR)
 
     mmd2 = mmd2_3gram(cand_streams, prod_streams)
     d_act = action_jaccard_distance(cand_streams, prod_streams)

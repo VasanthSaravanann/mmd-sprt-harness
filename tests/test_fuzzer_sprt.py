@@ -4,8 +4,8 @@ import pytest
 
 from harness.fuzzer_sprt_loop import (
     D6_THRESHOLD,
-    K_MUT_MAX,
     K_MUT_MIN,
+    K_MUT_MAX,
     K_MAX,
     R2_THRESHOLD,
     WINDOW_MIN,
@@ -89,7 +89,7 @@ def test_run_sprt_loop_reaches_kmax():
     res = run_sprt_loop(mutator, seed=3)
     assert res.k_used == K_MAX
     assert len(res.distances) == K_MAX
-    assert all(K_MUT_MIN <= k for k in res.mutation_counts)
+    assert all(K_MUT_MIN <= k <= K_MUT_MAX for k in res.mutation_counts)
     assert len(res.viability) == K_MAX
 
 

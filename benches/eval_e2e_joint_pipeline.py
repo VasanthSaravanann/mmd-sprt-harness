@@ -142,7 +142,7 @@ def main():
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5))
     ax = axes[0]
-    im = ax.imshow(cm, cmap="Blues")
+    ax.imshow(cm, cmap="Blues")
     ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
     ax.set_xticklabels(["grant", "halt"]); ax.set_yticklabels(["A (valid)", "B (flawed)"])
     for i in range(2):

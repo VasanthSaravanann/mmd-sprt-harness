@@ -68,7 +68,9 @@ class DecayFit:
     r2: float
     d6: float
     converged: bool
-    verdict: str  # "PASS" | "INSUFFICIENT_FIT_HALT" | "NEEDS_MORE_DATA"
+    # "PASS" | "INSUFFICIENT_FIT_HALT" | "BUDGET_EXHAUSTED_CONVERGING"
+    # | "NEEDS_MORE_DATA" (window smaller than WINDOW_MIN, pre-fit only)
+    verdict: str
 
 
 def fit_exponential_decay(distances: Sequence[float]) -> DecayFit:
@@ -111,7 +113,9 @@ def fit_exponential_decay(distances: Sequence[float]) -> DecayFit:
         verdict = "PASS"
         converged = True
     else:
-        verdict = "NEEDS_MORE_DATA"
+        # Good fit but the extrapolated distance is still above threshold after
+        # exhausting the iteration budget — matches the Rust Verdict token.
+        verdict = "BUDGET_EXHAUSTED_CONVERGING"
         converged = False
     return DecayFit(beta_0, lam, r2, d6, converged, verdict)
 

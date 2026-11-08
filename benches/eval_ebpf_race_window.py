@@ -19,10 +19,7 @@ Assertion: userspace socket IPC ~1.8–4.2 ms; eBPF in-kernel termination < 10 u
 """
 from __future__ import annotations
 
-import math
 import os
-import random
-import sys
 
 import matplotlib
 matplotlib.use("Agg")

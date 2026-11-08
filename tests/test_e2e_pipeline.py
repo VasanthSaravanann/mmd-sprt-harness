@@ -7,7 +7,6 @@ import numpy as np
 from harness.gate0 import gate0
 from harness.pipeline import (
     STAGES,
-    PipelineReport,
     SystemUnderTest,
     run_pipeline,
     stage_summary,
@@ -158,3 +157,23 @@ def test_gate0_alone_flips_between_systems():
     r2 = gate0(*_flawed_system().projection)
     assert r1.passed is True
     assert r2.passed is False
+
+# --------------------------------------------------------------------------
+# Regression: the verifier stage must actually route SIGKILL (previously
+# gate.route() was never called, so the latency check was vacuously True).
+# --------------------------------------------------------------------------
+def test_verifier_stage_routes_sigkill_latency():
+    # Tier-1 event with no pending Tier-2 triggers route_sigkill; with a
+    # simulated latency just over budget the verifier stage must FAIL.
+    tele = [{"ts": 0.0, "event_id": "e1", "tier": 1, "token": "tk",
+             "logit": 0.4, "kind": "near_miss"}]
+    sut = SystemUnderTest(
+        projection=_robust_system().projection,
+        sprt_distances=[0.30, 0.20, 0.12, 0.07, 0.04],
+        ipw_data=_good_ipw(),
+        telemetry=tele,
+    )
+    report = run_pipeline(sut, sigkill_latency_us=2500.0)  # 2.5ms > 2ms budget
+    assert report.stage("verifier").passed is False
+    report_ok = run_pipeline(sut, sigkill_latency_us=125.0)
+    assert report_ok.stage("verifier").passed is True

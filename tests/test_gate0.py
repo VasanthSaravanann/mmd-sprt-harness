@@ -122,3 +122,21 @@ def test_normal_candidate_uses_shared_actions():
 
 def test_bandwidth_constant_sane():
     assert 0.0 < SIGMA_BW <= 1.0
+
+# --------------------------------------------------------------------------
+# Regression: a degenerate production set (0 or 1 stream) must NOT yield
+# eps_prod = inf, which previously let any candidate pass the MMD^2 check.
+# --------------------------------------------------------------------------
+def test_gate0_degenerate_single_prod_does_not_bypass():
+    prod = [["a", "b", "c"] * 10]
+    # candidate with identical action set but a shifted 3-gram distribution
+    cand = [["a", "b", "c"] * 10 + ["a", "b"]]
+    res = gate0(prod, cand)
+    assert res.eps_prod == MMD2_FLOOR, "degenerate prod must use the absolute floor"
+    # shifted distribution must now FAIL the MMD^2 check (previously passed via inf eps)
+    assert res.mmd2 > res.eps_prod
+    assert res.passed is False
+
+
+def test_mmd2_both_empty_is_zero_not_inf():
+    assert mmd2_3gram([], []) == 0.0

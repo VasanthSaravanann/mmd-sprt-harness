@@ -77,7 +77,8 @@ a zero-copy `BPF_MAP_TYPE_RINGBUF`, kills the canary-accessor in the kernel via
   halts with `INSUFFICIENT_FIT_HALT`.
 - **Phase 4** — IPW weights are winsorized at P99 before computing the effective
   sample size `n_eff = (Σw)²/Σw²` and a weighted **Spearman** correlation
-  `r_{2,IPW}`. Requires `n_eff ≥ 30` and `r_{2,IPW} > 0.85`.
+  `r_{2,IPW}`. Requires `n_eff ≥ 30`, `r_{2,IPW} > 0.85` and a two-sided
+  `p < 0.01`.  The production subsample is a seeded uniform random 1% draw.
 
 The Phase 4 winsorization uses the lower percentile rank `floor(p·(n−1))` so the
 top `1−p` fraction is genuinely capped (using `ceil` silently left outliers

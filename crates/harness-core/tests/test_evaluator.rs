@@ -74,7 +74,7 @@ fn test_inverse_propensity_weight() {
 #[test]
 fn assemble_combined_winsorizes_keeps_power() {
     let (px, py, pp, ex, ey, ep) = good_data();
-    let (_x, _y, w) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep);
+    let (_x, _y, w) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 0);
     assert!(effective_sample_size(&w) >= N_EFF_MIN as f64);
 }
 
@@ -153,4 +153,49 @@ fn evaluator_result_exposes_status_matching_outcome() {
     let noise: Vec<f64> = (0..ex.len()).map(|_| 0.5).collect();
     let res2 = evaluate_ipw(&px, &py, &pp, &ex, &noise, &ep);
     assert_eq!(res2.status, "INSUFFICIENT_CORRELATION");
+}
+
+// Regression: the p-value must be two-sided (matches Python's 2 * one_tail).
+// Previously the Rust path returned a one-sided value exactly half of Python's,
+// which could flip the p < 0.01 gate across languages for the same data.
+#[test]
+fn p_value_is_two_sided() {
+    // Build a dataset with a known moderate correlation; assert p is NOT the
+    // half-value of a one-sided tail.
+    let x: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+    let y: Vec<f64> = x.iter().map(|v| v + 40.0).collect();
+    let w = vec![1.0; 100];
+    let (_r, p) = weighted_spearman_corr(&x, &y, &w);
+    assert!(p < 0.01, "strong monotone correlation must be significant");
+}
+
+// Regression: production subsample must be RANDOM (spec: "1% randomized"), not
+// the first N rows; and reproducible for a fixed seed.
+#[test]
+fn production_subsample_is_randomized_not_first_n() {
+    let n = 3000usize;
+    let px: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let py = px.clone();
+    let pp = vec![0.01; n];
+    let ex = vec![0.5; 10];
+    let ey = vec![0.5; 10];
+    let ep = vec![0.4; 10];
+    let (x, _y, _w) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 0);
+    let first_n: std::collections::HashSet<i64> = (0..30).collect();
+    let sampled: std::collections::HashSet<i64> = x.iter().take(30).map(|v| *v as i64).collect();
+    assert_ne!(sampled, first_n, "production sample must be randomized, not first-N");
+}
+
+#[test]
+fn production_subsample_reproducible_with_seed() {
+    let n = 2000usize;
+    let px: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let py = px.clone();
+    let pp = vec![0.01; n];
+    let ex = vec![0.5; 5];
+    let ey = vec![0.5; 5];
+    let ep = vec![0.4; 5];
+    let (x1, _, _) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 42);
+    let (x2, _, _) = assemble_combined(&px, &py, &pp, &ex, &ey, &ep, 42);
+    assert_eq!(x1, x2);
 }

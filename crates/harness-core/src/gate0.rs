@@ -183,10 +183,19 @@ pub fn action_jaccard_distance(x: &[Stream], y: &[Stream]) -> f64 {
 }
 
 /// Run the Gate 0 attestation.
+///
+/// Degenerate production sets are guarded: with 0 or 1 production streams the
+/// within-production dispersion cannot be estimated (the second split half is
+/// empty and MMD^2 is +inf), which previously set `eps_prod = inf` and let ANY
+/// candidate pass the distributional check.  In that case we use the absolute
+/// floor `MMD2_FLOOR` as `eps_prod`.
 pub fn gate0(prod: &[Stream], cand: &[Stream]) -> Gate0Result {
-    let half = (prod.len() / 2).max(1);
-    let pp = mmd2(&prod[..half], &prod[half..], SIGMA_BW);
-    let eps_prod = pp.max(MMD2_FLOOR);
+    let eps_prod = if prod.len() < 2 {
+        MMD2_FLOOR
+    } else {
+        let half = (prod.len() / 2).max(1);
+        mmd2(&prod[..half], &prod[half..], SIGMA_BW).max(MMD2_FLOOR)
+    };
 
     let mmd2 = mmd2(cand, prod, SIGMA_BW);
     let d_act = action_jaccard_distance(cand, prod);
