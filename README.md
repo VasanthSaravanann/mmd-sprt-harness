@@ -2,8 +2,9 @@
 
 Distributional-attestation + SPRT verification pipeline gating deployment of a guarded subsystem.
 The harness gates deployment by verifying that incoming telemetry stays distributionally aligned
-with production (**Gate 0**), that the adaptive fuzzing loop is converging (**SPRT**), and that
-offline evaluation shows sufficient power and a strong IPW correlation (**Phase 4**).
+with production (**Gate 0**), that the SPRT exponential-decay convergence diagnostic passes
+(**SPRT**), and that offline evaluation shows sufficient power and a strong IPW correlation
+(**Phase 4**).
 
 **Primary implementation:** Rust (`crates/`), **reference cross-check:** Python (`harness/`, `tests/`).
 
@@ -20,7 +21,7 @@ cd mmd-sprt-harness
 
 # Rust workspace (eBPF crates excluded from default build)
 cargo test                                # 46 tests
-cargo bench -p harness-pipeline           # 6 criterion benchmarks
+cargo bench -p harness-pipeline           # 5 criterion benchmarks
 cargo run --release -p harness-pipeline --bin bench_report  # → benches/criterion_summary.json
 
 # Python reference suite
@@ -102,14 +103,14 @@ Latency is the wall-clock time from `fork()` to `waitpid()` receiving SIGKILL.
 
 | Metric | Value |
 |---|---|
-| SIGKILL latency median | 2.9 ms (cores at full clock) |
-| SIGKILL latency p95 | 6.3 ms |
-| SIGKILL latency max | 32.2 ms (scheduling tail) |
+| SIGKILL latency median | 4.2 ms |
+| SIGKILL latency p95 | 5.7 ms |
+| SIGKILL latency max | 6.9 ms |
 | Loader CPU (mean / peak) | 0.9% / 10.0% |
 | Loader RSS | 37.9 MB |
 
-Note: the median drops under load (cores stay at max turbo frequency), but the
-tail widens significantly (scheduler occasionally delays the child's timeslice).
+Note: the tail widens under CPU load (p95 goes from 5.4 ms to 5.7 ms), driven by
+scheduler jitter delaying the child's timeslice.
 
 ## Pipeline stages
 
@@ -125,7 +126,7 @@ tail widens significantly (scheduler occasionally delays the child's timeslice).
 | Figure | Script | What it shows | Reproducible on |
 |---|---|---|---|
 | `fig1_gate0_sensitivity.pdf` | `benches/eval_gate0_sensitivity.py` | MMD² vs cosine across 0-5% injection rate | Any OS |
-| `fig2_sprt_token_savings.pdf` | `benches/eval_sprt_efficiency.py` | SPRT token savings CDF (≥35%, FPR<5%) | Any OS |
+| `fig2_sprt_token_savings.pdf` | `benches/eval_sprt_efficiency.py` | Fixed-budget vs SPRT mean rounds (36% savings) | Any OS |
 | `fig3_ipw_winsorization.pdf` | `benches/eval_ipw_variance.py` | P99 winsorization preserves n_eff≥30 | Any OS |
 | `fig4_sprt_window_ablation.pdf` | `benches/eval_sprt_ablation.py` | Real exponential-fit false-decision rates | Any OS |
 | `fig5_ebpf_latency.pdf` | `benches/eval_ebpf_race_window.py` | Simulated userspace vs eBPF (macOS) | macOS |
@@ -136,8 +137,8 @@ tail widens significantly (scheduler occasionally delays the child's timeslice).
 | `fig10_ebpf_enforcement_latency.pdf` | `benches/eval_ebpf_bench.py` | Real SIGKILL latency distribution | **Linux + root** |
 | `fig11_ebpf_ringbuf_throughput.pdf` | `benches/eval_ebpf_bench.py` | Ringbuf throughput bar chart | **Linux + root** |
 
-All figures can be regenerated with `benches/run_all_benches.sh` (macOS figs)
-or `benches/eval_ebpf_bench.py` (Linux eBPF figs).
+Figures 1-9 can be regenerated with `benches/run_all_benches.sh` (macOS/dev host).
+Figures 10-11 require a Linux host with root: `benches/eval_ebpf_bench.py`.
 
 ## Mathematical notes
 

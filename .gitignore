@@ -16,4 +16,4 @@ Cargo.lock.local
 *.rs.bk
 
 # macOS
-.DS_Store
+.DS_Store*.pdf
