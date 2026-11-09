@@ -16,4 +16,13 @@ Cargo.lock.local
 *.rs.bk
 
 # macOS
-.DS_Store*.pdf
+.DS_Store
+
+# Misc generated / paper files
+*.pdf
+Deterministic Bounds Are a Trap.pdf
+wp/latex_theorems.md
+wp/docker/Dockerfile
+
+# Old output directories
+ebpf-bench5/*.pdf
