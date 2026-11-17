@@ -19,14 +19,13 @@ default-members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/VasanthSaravanann/mmd-sprt-harness"
 
 [workspace.dependencies]
 # core harness deps
 rayon = "1.10"
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
-ndarray = { version = "0.16", features = ["rayon"] }
 rand = { version = "0.8", features = ["small_rng"] }
-num-traits = "0.2"
 
 # pipeline
 criterion = "0.5"

@@ -3,11 +3,11 @@ name = "harness-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core distributional-attestation, SPRT, and IPW evaluation kernels."
+repository.workspace = true
+description = "Core kernels: 3-gram RBF MMD-squared + Action Jaccard (Gate 0), exponential-decay convergence diagnostics (SPRT), and P99-winsorized weighted-Spearman IPW correlation (Phase 4)."
 
 [dependencies]
 rayon.workspace = true
-rand.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

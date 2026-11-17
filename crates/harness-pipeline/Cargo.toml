@@ -3,7 +3,8 @@ name = "harness-pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Unified end-to-end pipeline wiring Gate 0, SPRT, and IPW."
+repository.workspace = true
+description = "End-to-end pipeline wiring Gate 0, the parallel SPRT loop, and the Phase 4 IPW gate into a single deployment verdict, plus criterion benchmarks."
 
 [dependencies]
 harness-core = { path = "../harness-core" }

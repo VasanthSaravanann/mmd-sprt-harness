@@ -1,14 +1,41 @@
 # MMD-SPRT Verification Harness
 
-Distributional-attestation + SPRT verification pipeline gating deployment of a guarded subsystem.
-The harness gates deployment by verifying that incoming telemetry stays distributionally aligned
-with production (**Gate 0**), that the SPRT exponential-decay convergence diagnostic passes
-(**SPRT**), and that offline evaluation shows sufficient power and a strong IPW correlation
-(**Phase 4**).
+A deployment-gating harness for a guarded subsystem. It decides whether a candidate system may be
+released by running four independent checks and combining them into a single verdict.
 
-**Primary implementation:** Rust (`crates/`), **reference cross-check:** Python (`harness/`, `tests/`).
+**Primary implementation:** Rust (`crates/`). **Reference cross-check:** Python (`harness/`, `tests/`).
 
 **Verified at HEAD:** Rust 46 tests, Python 64 tests, 0 flake8 issues, 0 Rust warnings.
+
+## Project description
+
+| Component | What it actually does | Implementation |
+|---|---|---|
+| **Gate 0** — distributional attestation | Length-normalised 3-gram spectra compared with a Gaussian-RBF MMD² kernel (`σ = 0.15`). Fails if `MMD² > ε_prod` where `ε_prod = max(MMD²_prod‑prod, 0.015)`, or if Action Jaccard `D_act ≥ 0.05` | `crates/harness-core/src/gate0.rs`, `harness/gate0.py` |
+| **SPRT** — convergence diagnostic | Fits `d^(i) = β₀·e^(−λi)` over a rolling `N ≥ 5` window and extrapolates to `d⁽⁶⁾`. PASS iff `R² ≥ 0.90` **and** `d⁽⁶⁾ < 0.02`. Runs at most `K_MAX = 6` checks per trajectory | `crates/harness-core/src/sprt.rs`, `harness/fuzzer_sprt_loop.py` |
+| **Phase 4** — IPW correlation gate | P99 winsorization (lower percentile rank `floor(p·(n−1))`), Kish `n_eff`, weighted **Spearman** correlation, exact two-sided Student-t `p` via the regularized incomplete beta. Requires `n_eff ≥ 30`, `r > 0.85`, `p < 0.01` | `crates/harness-core/src/evaluator.rs`, `harness/evaluator.py` |
+| **Pipeline** — aggregate verdict | ANDs the three gates into `FULL_DEPLOYMENT_GRANTED` / `DEPLOYMENT_HALTED` | `crates/harness-pipeline/src/lib.rs`, `harness/pipeline.py` |
+| **eBPF interceptor** — kernel enforcement | kprobes on `__x64_sys_connect` (telemetry only) and `__x64_sys_openat` / `__x64_sys_open` / `__x64_sys_openat2` (matches `/tmp/canary_token.key` and fires `bpf_send_signal(SIGKILL)`), streaming events over `BPF_MAP_TYPE_RINGBUF` | `crates/ebpf-verifier-ebpf`, `crates/ebpf-verifier` |
+
+### Measured eBPF numbers (real Linux run)
+
+From `benches/ebpf-bench/{plain,stress}/container_performance.json` (150 samples each):
+median **4.3 ms** fork→SIGKILL (p95 5.4 ms, p99 6.0 ms), ringbuf **69,016 events/s**
+(8-thread saturation), loader **37.9 MB RSS** at **0.6% mean CPU**.
+
+### What is *not* claimed
+
+This repo contains no Wald SPRT (no `p₀`/`p₁` boundaries, no α/β error targets), no GRU or neural
+predictor, no regex or zero-width-Unicode filter, and no connection between the statistical gates
+and the kernel program — the eBPF side is a standalone canary-path interceptor, not a consumer of
+pipeline verdicts. Numerical results are only those produced by the scripts in `benches/`.
+
+### What is simulated
+
+`fig5_ebpf_latency.pdf` is a **macOS simulation** (no BPF VM available) used only for scale
+comparison; treat it as illustrative. The SPRT and trace-suite benchmarks run on **synthetic**
+trajectories (motif strings from `wp/traces/generate_traces.py`), not on recorded agent traffic.
+Real kernel measurements live in `benches/ebpf-bench/`.
 
 ## How to reproduce everything
 

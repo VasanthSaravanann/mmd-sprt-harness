@@ -3,7 +3,8 @@ name = "ebpf-verifier"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Userspace side of the eBPF verifier: loads programs, attaches kprobes, drains ringbuf."
+repository.workspace = true
+description = "Userspace eBPF control plane (aya 0.13): loads the kernel program, attaches the connect/open/openat/openat2 kprobes, and drains the ringbuf telemetry stream. Linux + root only."
 
 [dependencies]
 aya = { version = "0.13", features = ["tokio"] }
